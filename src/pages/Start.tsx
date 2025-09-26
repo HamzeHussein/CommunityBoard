@@ -14,3 +14,10 @@ export default function Start() {
     </Col>
   </Row>
 }
+
+
+(Start as any).route = {
+  path: '/',
+  menuLabel: 'Start',
+  index: 1,
+};
