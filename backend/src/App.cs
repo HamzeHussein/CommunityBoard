@@ -1,15 +1,20 @@
 // Global settings
+var port = args.Length > 0 ? args[0] : "5000";
+var frontendPath = args.Length > 1 ? args[1] : "../public";
+var dbPath = args.Length > 2 ? args[2] : "_db.sqlite3";
+
 Globals = Obj(new
 {
     debugOn = true,
     detailedAclDebug = false,
-    aclOn = true,
+    aclOn = false,
     isSpa = true,
-    port = args[0],
+    port,
     serverName = "Minimal API Backend",
-    frontendPath = args[1],
-    dbPath = args[2],
+    frontendPath,
+    dbPath,
     sessionLifeTimeHours = 2
 });
 
 Server.Start();
+
