@@ -8,13 +8,52 @@ namespace WebApp;
 
 public static class RestApi
 {
-    private static readonly string[] _allowedTables = { "posts", "users", "categories" };
-    private static readonly string[] _allowedPostFields = { "title", "content", "category", "author", "updatedAt" };
+    private static readonly string[] _allowedTables = { "posts", "users" };
+    private static readonly string[] _allowedPostFields = { "title", "content", "category", "author", "created" };
 
     public static void Start()
     {
         // --- HEALTH (snabb koll att backend lever) ---
         App.MapGet("/api/health", () => Results.Ok(new { ok = true, time = DateTime.UtcNow }));
+
+        // --- DEBUG: Databas information ---
+        App.MapGet("/api/debug/database-info", () =>
+        {
+            var currentDir = Directory.GetCurrentDirectory();
+            var dbFiles = Directory.GetFiles(currentDir, "*.sqlite*");
+
+            return Results.Ok(new
+            {
+                currentDirectory = currentDir,
+                databaseFiles = dbFiles,
+                databaseFileExists = File.Exists("_db.sqlite3"),
+                fileSize = File.Exists("_db.sqlite3") ? new FileInfo("_db.sqlite3").Length : 0
+            });
+        });
+
+        // --- DEBUG: Testa SQL-frågor ---
+        App.MapGet("/api/debug/test-query", (HttpContext context) =>
+        {
+            try
+            {
+                // Testa en enkel count-fråga
+                var countResult = SQLQueryOne("SELECT COUNT(*) as postCount FROM posts", Obj(new { }), context);
+
+                // Testa att hämta alla posts
+                var postsResult = SQLQuery("SELECT * FROM posts", Obj(new { }), context);
+
+                return Results.Ok(new
+                {
+                    countResult = countResult,
+                    postsResult = postsResult,
+                    success = true
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem($"Query error: {ex.Message}");
+            }
+        });
 
         // --- Preflight (OPTIONS) – stöd för credentials ---
         App.MapMethods("/api/{**path}", new[] { "OPTIONS" }, (HttpContext ctx) =>
@@ -64,17 +103,19 @@ public static class RestApi
                     where += " AND category = $category";
                 }
 
+                // FIXAD: Använder 'created' istället för 'created as createdAt'
                 var sql = $@"
-                    SELECT *
+                    SELECT id, title, content, author, category, created
                     FROM posts
                     {where}
-                    ORDER BY createdAt DESC";
+                    ORDER BY created DESC";
 
                 var result = SQLQuery(sql, parameters, context);
                 return RestResult.Parse(context, result);
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR in /api/posts: {ex.Message}");
                 return Results.Problem($"Error retrieving posts: {ex.Message}");
             }
         });
@@ -91,7 +132,6 @@ public static class RestApi
                 if (validationResult != null) return validationResult;
 
                 body.id = id;
-                body.updatedAt = DateTime.UtcNow.ToString("o");
 
                 var parsed = ReqBodyParse("posts", body, _allowedPostFields);
                 var update = parsed.update;
@@ -103,6 +143,7 @@ public static class RestApi
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR in PUT /api/posts/{id}: {ex.Message}");
                 return Results.Problem($"Error updating post: {ex.Message}");
             }
         });
@@ -122,7 +163,7 @@ public static class RestApi
                 {
                     var validationResult = ValidatePostData(body);
                     if (validationResult != null) return validationResult;
-                    body.createdAt = DateTime.UtcNow.ToString("o");
+                    // Databasen sätter created automatiskt med DEFAULT CURRENT_TIMESTAMP
                 }
 
                 var parsed = ReqBodyParse(table, body);
@@ -143,6 +184,7 @@ public static class RestApi
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR in POST /api/{table}: {ex.Message}");
                 return Results.Problem($"Error creating record: {ex.Message}");
             }
         });
@@ -153,14 +195,25 @@ public static class RestApi
             {
                 if (!IsValidTableName(table)) return Results.BadRequest("Invalid table name");
 
-                var sql = $"SELECT * FROM {table}";
-                var query = ParseQueryParameters(context.Request.Query); // Ändrat namn här
+                // FIXAD: Använder 'created' istället för 'created as createdAt'
+                var sql = table == "posts"
+                    ? "SELECT id, title, content, author, category, created FROM posts"
+                    : $"SELECT * FROM {table}";
+
+                var query = ParseQueryParameters(context.Request.Query);
                 sql += query.sql;
+
+                // Sortering för posts
+                if (table == "posts" && !sql.Contains("ORDER BY"))
+                {
+                    sql += " ORDER BY created DESC";
+                }
 
                 return RestResult.Parse(context, SQLQuery(sql, query.parameters, context));
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR in GET /api/{table}: {ex.Message}");
                 return Results.Problem($"Error retrieving data: {ex.Message}");
             }
         });
@@ -172,14 +225,20 @@ public static class RestApi
                 if (!IsValidTableName(table)) return Results.BadRequest("Invalid table name");
                 if (!IsValidId(id)) return Results.BadRequest("Invalid ID format");
 
+                // FIXAD: Använder 'created' istället för 'created as createdAt'
+                var sql = table == "posts"
+                    ? "SELECT id, title, content, author, category, created FROM posts WHERE id = $id"
+                    : $"SELECT * FROM {table} WHERE id = $id";
+
                 return RestResult.Parse(context, SQLQueryOne(
-                    $"SELECT * FROM {table} WHERE id = $id",
+                    sql,
                     ReqBodyParse(table, Obj(new { id })).body,
                     context
                 ));
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR in GET /api/{table}/{id}: {ex.Message}");
                 return Results.Problem($"Error retrieving record: {ex.Message}");
             }
         });
@@ -197,7 +256,6 @@ public static class RestApi
                 {
                     var validationResult = ValidatePostData(body);
                     if (validationResult != null) return validationResult;
-                    body.updatedAt = DateTime.UtcNow.ToString("o");
                 }
 
                 body.id = id;
@@ -211,6 +269,7 @@ public static class RestApi
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR in PUT /api/{table}/{id}: {ex.Message}");
                 return Results.Problem($"Error updating record: {ex.Message}");
             }
         });
@@ -230,6 +289,7 @@ public static class RestApi
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"ERROR in DELETE /api/{table}/{id}: {ex.Message}");
                 return Results.Problem($"Error deleting record: {ex.Message}");
             }
         });
@@ -317,7 +377,6 @@ public static class RestApi
              .Replace("\"", "&quot;")
              .Replace("'", "&#x27;");
 
-    // NY METOD - ersätter RestQuery.Parse för att fixa dubbleringsfelet
     private static dynamic ParseQueryParameters(IQueryCollection query)
     {
         var where = new List<string>();
