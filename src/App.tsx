@@ -1,22 +1,32 @@
-import { useLocation } from 'react-router-dom';
-import Header from "./partials/Header";
-import Main from './partials/Main';
-import Footer from './partials/Footer';
-import BootstrapBreakpoints from './parts/BootstrapBreakpoints';
+// src/App.tsx
+import { useEffect } from "react";
+import { useLocation } from "react-router-dom";
 
-// turn off when not needed for debugging
+import Header from "./partials/Header";
+import Main from "./partials/Main";
+import Footer from "./partials/Footer";
+import BootstrapBreakpoints from "./parts/BootstrapBreakpoints";
+
+// Auth-provider (från src/hooks/useAuth)
+import { AuthProvider } from "./hooks/useAuth";
+
+// slå av/på vid behov
 const showBootstrapBreakpoints = true;
 
 export default function App() {
+  const location = useLocation();
 
-  // scroll to top when the route changes
-  useLocation();
-  window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  // scrolla upp vid varje ruttbyte
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [location.pathname]);
 
-  return <>
-    <Header />
-    <Main />
-    <Footer />
-    {showBootstrapBreakpoints ? <BootstrapBreakpoints /> : null}
-  </>;
-};
+  return (
+    <AuthProvider>
+      <Header />
+      <Main />
+      <Footer />
+      {showBootstrapBreakpoints ? <BootstrapBreakpoints /> : null}
+    </AuthProvider>
+  );
+}

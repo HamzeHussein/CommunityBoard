@@ -1,7 +1,30 @@
 {
-  "files": [],
-  "references": [
-    { "path": "./tsconfig.app.json" },
-    { "path": "./tsconfig.node.json" }
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": [
+      "ES2020",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    // 👇 Detta är det viktiga för JSX/React 17+ (automatic runtime)
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    // Hjälper TS hitta typerna för Vite och React/DOM
+    "types": [
+      "vite/client",
+      "react",
+      "react-dom"
+    ]
+  },
+  "include": [
+    "src"
   ]
 }

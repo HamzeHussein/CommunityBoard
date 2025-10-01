@@ -3,6 +3,7 @@ import { useState, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Container, Nav, Navbar } from 'react-bootstrap';
 import routes from '../routes';
+import { useAuth } from '../hooks/useAuth';
 
 type AnyRoute = {
   path?: string;
@@ -12,32 +13,26 @@ type AnyRoute = {
 };
 
 export default function Header() {
-  // whether the navbar is expanded or not (close after selection)
   const [expanded, setExpanded] = useState(false);
+  const { user, logout } = useAuth();
 
-  // Always work with a *safe* array
   const allRoutes: AnyRoute[] = Array.isArray(routes) ? (routes as AnyRoute[]) : [];
-
-  // Current path
   const pathName = useLocation().pathname;
 
-  // Find current route by matching the longest path prefix first
   const currentRoute = useMemo(() => {
     return allRoutes
       .filter(r => typeof r?.path === 'string' && r.path!.length > 0)
       .slice()
-      .sort((a, b) => (b.path!.length) - (a.path!.length)) // longest first
+      .sort((a, b) => (b.path!.length) - (a.path!.length))
       .find(r => {
-        const base = String(r.path).split(':')[0]; // handle /user/:id
+        const base = String(r.path).split(':')[0];
         return base && pathName.indexOf(base) === 0;
       });
   }, [allRoutes, pathName]);
 
-  // A route is active if exact match or its parent matches
   const isActive = (path?: string) =>
     !!path && (path === currentRoute?.path || path === currentRoute?.parent);
 
-  // Menu items: only those with menuLabel, sorted by index
   const menuItems = useMemo(() => {
     return allRoutes
       .filter(r => !!r?.menuLabel && typeof r?.path === 'string')
@@ -73,6 +68,36 @@ export default function Header() {
                   {menuLabel}
                 </Nav.Link>
               ))}
+            </Nav>
+
+            {/* Auth-del till höger */}
+            <Nav>
+              {user ? (
+                <>
+                  <Nav.Item className="me-3 text-light">
+                    Hej, <strong>{user.username}</strong> ({user.role})
+                  </Nav.Item>
+                  <Nav.Link
+                    as="button"
+                    onClick={() => {
+                      logout();
+                      setExpanded(false);
+                    }}
+                    className="btn btn-sm btn-outline-light"
+                  >
+                    Logga ut
+                  </Nav.Link>
+                </>
+              ) : (
+                <>
+                  <Nav.Link as={Link} to="/login" onClick={() => setExpanded(false)}>
+                    Logga in
+                  </Nav.Link>
+                  <Nav.Link as={Link} to="/register" onClick={() => setExpanded(false)}>
+                    Registrera
+                  </Nav.Link>
+                </>
+              )}
             </Nav>
           </Navbar.Collapse>
         </Container>
