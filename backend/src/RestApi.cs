@@ -1,66 +1,151 @@
-using System.Text.Json;
+#nullable enable
 using System.Text.RegularExpressions;
-using System.Linq;
-using System.Dynamic;
-using System.Collections.Generic;
+using Microsoft.Data.Sqlite;
 
 namespace WebApp;
 
 public static class RestApi
 {
-    private static readonly string[] _allowedTables = { "posts", "users" };
-    private static readonly string[] _allowedPostFields = { "title", "content", "category", "author", "created" };
+    private static readonly Regex SafeCategory = new(@"^[a-zA-Z0-9\s\-_]{1,64}$", RegexOptions.Compiled);
+
+    // === Databasplacering: backend/data/_db.sqlite3 ===
+    private static string DbDir
+        => Path.Combine(App.Environment.ContentRootPath, "data");   // <projekt>/backend/data
+    private static string DbPath
+        => Path.Combine(DbDir, "_db.sqlite3");
+
+    private static void EnsureDbDirectory()
+    {
+        if (!Directory.Exists(DbDir))
+            Directory.CreateDirectory(DbDir);
+    }
+
+    private static SqliteConnection GetConn()
+    {
+        EnsureDbDirectory();
+        var cs = new SqliteConnectionStringBuilder
+        {
+            DataSource = DbPath,
+            Mode = SqliteOpenMode.ReadWriteCreate // skapar fil om saknas
+        }.ToString();
+        return new SqliteConnection(cs);
+    }
+
+    // === Auto-skapar schema och minimal seed om saknas ===
+    private static void EnsureSchema()
+    {
+        using var conn = GetConn();
+        conn.Open();
+
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = """
+                PRAGMA foreign_keys = ON;
+
+                CREATE TABLE IF NOT EXISTS users (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  username TEXT NOT NULL UNIQUE,
+                  password_hash TEXT NOT NULL,
+                  role TEXT NOT NULL CHECK(role IN ('admin','user')),
+                  created TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS posts (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  title    TEXT NOT NULL,
+                  content  TEXT NOT NULL,
+                  author   TEXT NOT NULL,
+                  category TEXT NOT NULL,
+                  created  TEXT NOT NULL DEFAULT (datetime('now')),
+                  updated  TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS comments (
+                  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                  post_id  INTEGER NOT NULL,
+                  author   TEXT NOT NULL,
+                  content  TEXT NOT NULL,
+                  created  TEXT NOT NULL DEFAULT (datetime('now')),
+                  FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_posts_category_created
+                  ON posts(category, created DESC);
+                CREATE INDEX IF NOT EXISTS idx_posts_title ON posts(title);
+                CREATE INDEX IF NOT EXISTS idx_comments_post_created
+                  ON comments(post_id, datetime(created) DESC);
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        // Minimal seed om tomt
+        using (var check = conn.CreateCommand())
+        {
+            check.CommandText = "SELECT COUNT(*) FROM users";
+            var usersCount = Convert.ToInt32(check.ExecuteScalar());
+            if (usersCount == 0)
+            {
+                using var seed = conn.CreateCommand();
+                seed.CommandText = """
+                    INSERT OR IGNORE INTO users (username, password_hash, role)
+                    VALUES ('admin', 'admin', 'admin');
+
+                    INSERT INTO posts (title, content, author, category)
+                    VALUES ('Välkommen', 'Första inlägget – systemet är igång!', 'admin', 'info');
+                    """;
+                seed.ExecuteNonQuery();
+            }
+        }
+    }
+
+    // --- Sanering & validering ---
+    private static string Sanitize(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+        // ta bort <script>...</script>
+        s = Regex.Replace(s, @"<\s*script\b[^>]*>(.*?)<\s*/\s*script\s*>", "", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        return s.Trim();
+    }
+    private static bool IsValidId(string? id) => int.TryParse(id, out var v) && v > 0;
+    private static bool IsValidTitle(string? t) => !string.IsNullOrWhiteSpace(t) && t!.Length <= 200;
+    private static bool IsValidAuthor(string? a) => !string.IsNullOrWhiteSpace(a) && a!.Length <= 100;
+    private static bool IsValidContent(string? c) => !string.IsNullOrWhiteSpace(c) && c!.Length <= 10_000;
+    private static bool IsValidCategory(string? c) => !string.IsNullOrWhiteSpace(c) && SafeCategory.IsMatch(c!);
+
+    // DTOs
+    private record PostDto(int id, string title, string content, string author, string category, string created, string? updated);
+    private record PostCreateDto(string title, string content, string author, string category);
+
+    private record CommentDto(int id, int post_id, string author, string content, string created);
+    private record CommentCreateDto(string author, string content);
 
     public static void Start()
     {
-        // --- HEALTH (snabb koll att backend lever) ---
-        App.MapGet("/api/health", () => Results.Ok(new { ok = true, time = DateTime.UtcNow }));
+        // Skapa mapp, fil och schema om det saknas
+        EnsureSchema();
 
-        // --- DEBUG: Databas information ---
-        App.MapGet("/api/debug/database-info", () =>
+        // HEALTH
+        App.MapGet("/api/health", () =>
+            Results.Ok(new { ok = true, time = DateTime.UtcNow, db = DbPath, exists = File.Exists(DbPath) }));
+
+        // DEBUG
+        App.MapGet("/api/debug/db", async () =>
         {
-            var currentDir = Directory.GetCurrentDirectory();
-            var dbFiles = Directory.GetFiles(currentDir, "*.sqlite*");
-
-            return Results.Ok(new
-            {
-                currentDirectory = currentDir,
-                databaseFiles = dbFiles,
-                databaseFileExists = File.Exists("_db.sqlite3"),
-                fileSize = File.Exists("_db.sqlite3") ? new FileInfo("_db.sqlite3").Length : 0
-            });
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+            var tables = new List<string>();
+            using var r = await cmd.ExecuteReaderAsync();
+            while (await r.ReadAsync()) tables.Add(r.GetString(0));
+            return Results.Ok(new { path = DbPath, exists = File.Exists(DbPath), tables });
         });
 
-        // --- DEBUG: Testa SQL-frågor ---
-        App.MapGet("/api/debug/test-query", (HttpContext context) =>
-        {
-            try
-            {
-                // Testa en enkel count-fråga
-                var countResult = SQLQueryOne("SELECT COUNT(*) as postCount FROM posts", Obj(new { }), context);
-
-                // Testa att hämta alla posts
-                var postsResult = SQLQuery("SELECT * FROM posts", Obj(new { }), context);
-
-                return Results.Ok(new
-                {
-                    countResult = countResult,
-                    postsResult = postsResult,
-                    success = true
-                });
-            }
-            catch (Exception ex)
-            {
-                return Results.Problem($"Query error: {ex.Message}");
-            }
-        });
-
-        // --- Preflight (OPTIONS) – stöd för credentials ---
+        // Preflight (OPTIONS)
         App.MapMethods("/api/{**path}", new[] { "OPTIONS" }, (HttpContext ctx) =>
         {
             var origin = ctx.Request.Headers.Origin.ToString();
             var allowOrigin = string.IsNullOrEmpty(origin) ? "http://localhost:5173" : origin;
-
             ctx.Response.Headers["Access-Control-Allow-Origin"] = allowOrigin;
             ctx.Response.Headers["Vary"] = "Origin";
             ctx.Response.Headers["Access-Control-Allow-Credentials"] = "true";
@@ -69,329 +154,279 @@ public static class RestApi
             return Results.Ok();
         });
 
-        // --- SPECIFIK GET /api/posts med sök/filtrering ---
-        App.MapGet("/api/posts", (HttpContext context) =>
+        // ===================== POSTS =====================
+
+        // LISTA
+        App.MapGet("/api/posts", async (HttpRequest req) =>
         {
-            try
+            var q = req.Query;
+            var rawSearch = (q["search"].ToString() ?? string.Empty).Trim();
+            var rawCategory = (q["category"].ToString() ?? string.Empty).Trim();
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+
+            var sql = """
+                SELECT id, title, content, author, category, created, updated
+                FROM posts
+                WHERE 1=1
+                """;
+            var cmd = conn.CreateCommand();
+            var clauses = new List<string>();
+
+            if (!string.IsNullOrWhiteSpace(rawSearch))
             {
-                var q = context.Request.Query;
-                var rawSearch = (q["search"].ToString() ?? string.Empty).Trim();
-                var rawCategory = (q["category"].ToString() ?? string.Empty).Trim();
-
-                var where = "WHERE 1=1";
-                dynamic parameters = Obj(new { });
-
-                if (!string.IsNullOrEmpty(rawSearch))
-                {
-                    var s = $"%{rawSearch.ToLower()}%";
-                    parameters.search = s;
-                    where += @"
-                        AND (
-                            LOWER(title)   LIKE $search OR
-                            LOWER(content) LIKE $search OR
-                            LOWER(author)  LIKE $search
-                        )";
-                }
-
-                if (!string.IsNullOrEmpty(rawCategory))
-                {
-                    if (!IsValidCategory(rawCategory))
-                    {
-                        return Results.BadRequest("Invalid category");
-                    }
-                    parameters.category = rawCategory;
-                    where += " AND category = $category";
-                }
-
-                // FIXAD: Använder 'created' istället för 'created as createdAt'
-                var sql = $@"
-                    SELECT id, title, content, author, category, created
-                    FROM posts
-                    {where}
-                    ORDER BY created DESC";
-
-                var result = SQLQuery(sql, parameters, context);
-                return RestResult.Parse(context, result);
+                clauses.Add("(LOWER(title) LIKE $q OR LOWER(content) LIKE $q OR LOWER(author) LIKE $q)");
+                cmd.Parameters.AddWithValue("$q", $"%{rawSearch.ToLower()}%");
             }
-            catch (Exception ex)
+            if (!string.IsNullOrWhiteSpace(rawCategory))
             {
-                Console.WriteLine($"ERROR in /api/posts: {ex.Message}");
-                return Results.Problem($"Error retrieving posts: {ex.Message}");
+                if (!IsValidCategory(rawCategory)) return Results.BadRequest(new { error = "Invalid category" });
+                clauses.Add("category = $cat");
+                cmd.Parameters.AddWithValue("$cat", rawCategory);
             }
-        });
+            if (clauses.Count > 0) sql += " AND " + string.Join(" AND ", clauses);
 
-        // --- SPECIFIK PUT /api/posts/{id} ---
-        App.MapPut("/api/posts/{id}", (HttpContext context, string id, JsonElement bodyJson) =>
-        {
-            try
+            sql += " ORDER BY datetime(created) DESC";
+            cmd.CommandText = sql;
+
+            var list = new List<PostDto>();
+            using var r = await cmd.ExecuteReaderAsync();
+            while (await r.ReadAsync())
             {
-                if (!IsValidId(id)) return Results.BadRequest("Invalid ID format");
-
-                var body = JSON.Parse(bodyJson.ToString());
-                var validationResult = ValidatePostData(body);
-                if (validationResult != null) return validationResult;
-
-                body.id = id;
-
-                var parsed = ReqBodyParse("posts", body, _allowedPostFields);
-                var update = parsed.update;
-
-                var sql = $"UPDATE posts SET {update} WHERE id = $id";
-                var result = SQLQueryOne(sql, parsed.body, context);
-
-                return RestResult.Parse(context, result);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR in PUT /api/posts/{id}: {ex.Message}");
-                return Results.Problem($"Error updating post: {ex.Message}");
-            }
-        });
-
-        // ===================== GENERISKA REST-rutter =====================
-
-        App.MapPost("/api/{table}", (HttpContext context, string table, JsonElement bodyJson) =>
-        {
-            try
-            {
-                if (!IsValidTableName(table)) return Results.BadRequest("Invalid table name");
-
-                var body = JSON.Parse(bodyJson.ToString());
-                body.Delete("id");
-
-                if (table == "posts")
-                {
-                    var validationResult = ValidatePostData(body);
-                    if (validationResult != null) return validationResult;
-                    // Databasen sätter created automatiskt med DEFAULT CURRENT_TIMESTAMP
-                }
-
-                var parsed = ReqBodyParse(table, body);
-                var sql = $"INSERT INTO {table}({parsed.insertColumns}) VALUES({parsed.insertValues})";
-                var result = SQLQueryOne(sql, parsed.body, context);
-
-                if (!result.HasKey("error"))
-                {
-                    result.insertId = SQLQueryOne(@$"
-                        SELECT id AS __insertId
-                        FROM {table}
-                        ORDER BY id DESC
-                        LIMIT 1
-                    ").__insertId;
-                }
-
-                return RestResult.Parse(context, result);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR in POST /api/{table}: {ex.Message}");
-                return Results.Problem($"Error creating record: {ex.Message}");
-            }
-        });
-
-        App.MapGet("/api/{table}", (HttpContext context, string table) =>
-        {
-            try
-            {
-                if (!IsValidTableName(table)) return Results.BadRequest("Invalid table name");
-
-                // FIXAD: Använder 'created' istället för 'created as createdAt'
-                var sql = table == "posts"
-                    ? "SELECT id, title, content, author, category, created FROM posts"
-                    : $"SELECT * FROM {table}";
-
-                var query = ParseQueryParameters(context.Request.Query);
-                sql += query.sql;
-
-                // Sortering för posts
-                if (table == "posts" && !sql.Contains("ORDER BY"))
-                {
-                    sql += " ORDER BY created DESC";
-                }
-
-                return RestResult.Parse(context, SQLQuery(sql, query.parameters, context));
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR in GET /api/{table}: {ex.Message}");
-                return Results.Problem($"Error retrieving data: {ex.Message}");
-            }
-        });
-
-        App.MapGet("/api/{table}/{id}", (HttpContext context, string table, string id) =>
-        {
-            try
-            {
-                if (!IsValidTableName(table)) return Results.BadRequest("Invalid table name");
-                if (!IsValidId(id)) return Results.BadRequest("Invalid ID format");
-
-                // FIXAD: Använder 'created' istället för 'created as createdAt'
-                var sql = table == "posts"
-                    ? "SELECT id, title, content, author, category, created FROM posts WHERE id = $id"
-                    : $"SELECT * FROM {table} WHERE id = $id";
-
-                return RestResult.Parse(context, SQLQueryOne(
-                    sql,
-                    ReqBodyParse(table, Obj(new { id })).body,
-                    context
+                list.Add(new PostDto(
+                    r.GetInt32(0), r.GetString(1), r.GetString(2),
+                    r.GetString(3), r.GetString(4), r.GetString(5),
+                    r.IsDBNull(6) ? null : r.GetString(6)
                 ));
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR in GET /api/{table}/{id}: {ex.Message}");
-                return Results.Problem($"Error retrieving record: {ex.Message}");
-            }
+            return Results.Ok(list);
         });
 
-        App.MapPut("/api/{table}/{id}", (HttpContext context, string table, string id, JsonElement bodyJson) =>
+        // GET BY ID
+        App.MapGet("/api/posts/{id}", async (string id) =>
         {
-            try
-            {
-                if (!IsValidTableName(table)) return Results.BadRequest("Invalid table name");
-                if (!IsValidId(id)) return Results.BadRequest("Invalid ID format");
+            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
 
-                var body = JSON.Parse(bodyJson.ToString());
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, title, content, author, category, created, updated
+                FROM posts
+                WHERE id=$id
+                """;
+            cmd.Parameters.AddWithValue("$id", int.Parse(id));
 
-                if (table == "posts")
-                {
-                    var validationResult = ValidatePostData(body);
-                    if (validationResult != null) return validationResult;
-                }
+            using var r = await cmd.ExecuteReaderAsync();
+            if (!await r.ReadAsync()) return Results.NotFound();
 
-                body.id = id;
-                var parsed = ReqBodyParse(table, body);
-                var update = parsed.update;
-
-                var sql = $"UPDATE {table} SET {update} WHERE id = $id";
-                var result = SQLQueryOne(sql, parsed.body, context);
-
-                return RestResult.Parse(context, result);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR in PUT /api/{table}/{id}: {ex.Message}");
-                return Results.Problem($"Error updating record: {ex.Message}");
-            }
+            var dto = new PostDto(
+                r.GetInt32(0), r.GetString(1), r.GetString(2),
+                r.GetString(3), r.GetString(4), r.GetString(5),
+                r.IsDBNull(6) ? null : r.GetString(6)
+            );
+            return Results.Ok(dto);
         });
 
-        App.MapDelete("/api/{table}/{id}", (HttpContext context, string table, string id) =>
+        // CREATE (separerar INSERT + last_insert_rowid för stabilitet)
+        App.MapPost("/api/posts", async (PostCreateDto incoming) =>
         {
-            try
-            {
-                if (!IsValidTableName(table)) return Results.BadRequest("Invalid table name");
-                if (!IsValidId(id)) return Results.BadRequest("Invalid ID format");
+            var title = Sanitize(incoming.title);
+            var content = Sanitize(incoming.content);
+            var author = Sanitize(incoming.author);
+            var category = Sanitize(incoming.category);
 
-                return RestResult.Parse(context, SQLQueryOne(
-                    $"DELETE FROM {table} WHERE id = $id",
-                    ReqBodyParse(table, Obj(new { id })).body,
-                    context
+            if (!IsValidTitle(title) || !IsValidContent(content) || !IsValidAuthor(author) || !IsValidCategory(category))
+                return Results.BadRequest(new { error = "Invalid input" });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+
+            using (var insert = conn.CreateCommand())
+            {
+                insert.CommandText = """
+                    INSERT INTO posts (title, content, author, category)
+                    VALUES ($t, $c, $a, $cat)
+                    """;
+                insert.Parameters.AddWithValue("$t", title);
+                insert.Parameters.AddWithValue("$c", content);
+                insert.Parameters.AddWithValue("$a", author);
+                insert.Parameters.AddWithValue("$cat", category);
+                await insert.ExecuteNonQueryAsync();
+            }
+
+            long id;
+            using (var last = conn.CreateCommand())
+            {
+                last.CommandText = "SELECT last_insert_rowid()";
+                id = Convert.ToInt64(await last.ExecuteScalarAsync());
+            }
+
+            return Results.Created($"/api/posts/{id}", new { id });
+        });
+
+        // UPDATE
+        App.MapPut("/api/posts/{id}", async (string id, PostCreateDto incoming) =>
+        {
+            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
+
+            var title = Sanitize(incoming.title);
+            var content = Sanitize(incoming.content);
+            var author = Sanitize(incoming.author);
+            var category = Sanitize(incoming.category);
+
+            if (!IsValidTitle(title) || !IsValidContent(content) || !IsValidAuthor(author) || !IsValidCategory(category))
+                return Results.BadRequest(new { error = "Invalid input" });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                UPDATE posts
+                SET title=$t, content=$c, author=$a, category=$cat, updated=datetime('now')
+                WHERE id=$id;
+                """;
+            cmd.Parameters.AddWithValue("$t", title);
+            cmd.Parameters.AddWithValue("$c", content);
+            cmd.Parameters.AddWithValue("$a", author);
+            cmd.Parameters.AddWithValue("$cat", category);
+            cmd.Parameters.AddWithValue("$id", int.Parse(id));
+
+            var rows = await cmd.ExecuteNonQueryAsync();
+            return rows == 0 ? Results.NotFound() : Results.NoContent();
+        });
+
+        // DELETE
+        App.MapDelete("/api/posts/{id}", async (string id) =>
+        {
+            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM posts WHERE id=$id";
+            cmd.Parameters.AddWithValue("$id", int.Parse(id));
+
+            var rows = await cmd.ExecuteNonQueryAsync();
+            return rows == 0 ? Results.NotFound() : Results.NoContent();
+        });
+
+        // ===================== COMMENTS =====================
+
+        // GET /api/posts/{postId}/comments
+        App.MapGet("/api/posts/{postId}/comments", async (string postId) =>
+        {
+            if (!IsValidId(postId)) return Results.BadRequest(new { error = "Invalid post id" });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, post_id, author, content, created
+                FROM comments
+                WHERE post_id = $pid
+                ORDER BY datetime(created) DESC
+                """;
+            cmd.Parameters.AddWithValue("$pid", int.Parse(postId));
+
+            var list = new List<CommentDto>();
+            using var r = await cmd.ExecuteReaderAsync();
+            while (await r.ReadAsync())
+            {
+                list.Add(new CommentDto(
+                    r.GetInt32(0), r.GetInt32(1),
+                    r.GetString(2), r.GetString(3), r.GetString(4)
                 ));
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR in DELETE /api/{table}/{id}: {ex.Message}");
-                return Results.Problem($"Error deleting record: {ex.Message}");
-            }
+            return Results.Ok(list);
         });
-    }
 
-    // ===================== HJÄLPMETODER =====================
-
-    private static bool IsValidTableName(string table)
-    {
-        var tableLower = table?.ToLower() ?? "";
-        return _allowedTables.Any(allowedTable => allowedTable == tableLower);
-    }
-
-    private static bool IsValidId(string id) =>
-        !string.IsNullOrWhiteSpace(id) && Regex.IsMatch(id, @"^\d+$");
-
-    private static bool IsValidCategory(string category)
-    {
-        return !string.IsNullOrWhiteSpace(category) &&
-               category.Length <= 50 &&
-               Regex.IsMatch(category, @"^[a-zA-Z0-9\s\-_]+$");
-    }
-
-    private static IResult ValidatePostData(dynamic body)
-    {
-        if (body == null) return Results.BadRequest("Request body is required");
-
-        var title = body.title?.ToString() ?? "";
-        var content = body.content?.ToString() ?? "";
-
-        if (string.IsNullOrWhiteSpace(title)) return Results.BadRequest("Title is required");
-        if (string.IsNullOrWhiteSpace(content)) return Results.BadRequest("Content is required");
-        if (title.Length > 200) return Results.BadRequest("Title too long");
-        if (content.Length > 4000) return Results.BadRequest("Content too long");
-
-        return null;
-    }
-
-    private static dynamic ReqBodyParse(string table, dynamic body, string[] allowedFields = null)
-    {
-        var bodyDict = new Dictionary<string, object>();
-        var setParts = new List<string>();
-        var columns = new List<string>();
-        var values = new List<string>();
-
-        foreach (var prop in body.GetProperties())
+        // POST /api/posts/{postId}/comments
+        App.MapPost("/api/posts/{postId}/comments", async (string postId, CommentCreateDto incoming) =>
         {
-            var key = prop.Key;
-            var value = prop.Value;
+            if (!IsValidId(postId)) return Results.BadRequest(new { error = "Invalid post id" });
 
-            if (allowedFields != null)
+            var author = Sanitize(incoming.author);
+            var content = Sanitize(incoming.content);
+            if (string.IsNullOrWhiteSpace(author) || author.Length > 100)
+                return Results.BadRequest(new { error = "Invalid author" });
+            if (string.IsNullOrWhiteSpace(content) || content.Length > 4000)
+                return Results.BadRequest(new { error = "Invalid content" });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+
+            // Validera att posten finns
+            using (var check = conn.CreateCommand())
             {
-                var allowedFieldsList = allowedFields.ToList();
-                if (!allowedFieldsList.Contains(key))
-                    continue;
+                check.CommandText = "SELECT 1 FROM posts WHERE id = $pid";
+                check.Parameters.AddWithValue("$pid", int.Parse(postId));
+                var exists = await check.ExecuteScalarAsync();
+                if (exists is null) return Results.NotFound(new { error = "Post not found" });
             }
 
-            if (value is string strVal)
-                value = EscapeHtml(strVal);
-
-            bodyDict[key] = value;
-
-            if (key != "id")
+            // Insert
+            using (var insert = conn.CreateCommand())
             {
-                setParts.Add($"{key} = ${key}");
-                columns.Add(key);
-                values.Add($"${key}");
+                insert.CommandText = """
+                    INSERT INTO comments (post_id, author, content, created)
+                    VALUES ($pid, $a, $c, datetime('now'))
+                    """;
+                insert.Parameters.AddWithValue("$pid", int.Parse(postId));
+                insert.Parameters.AddWithValue("$a", author);
+                insert.Parameters.AddWithValue("$c", content);
+                await insert.ExecuteNonQueryAsync();
             }
-        }
 
-        return new
+            // Hämta id
+            long id;
+            using (var last = conn.CreateCommand())
+            {
+                last.CommandText = "SELECT last_insert_rowid()";
+                id = Convert.ToInt64(await last.ExecuteScalarAsync());
+            }
+
+            return Results.Created($"/api/comments/{id}", new { id });
+        });
+
+        // DELETE /api/comments/{id}
+        App.MapDelete("/api/comments/{id}", async (string id) =>
         {
-            update = string.Join(", ", setParts),
-            insertColumns = string.Join(", ", columns),
-            insertValues = string.Join(", ", values),
-            body = Obj(bodyDict)
-        };
-    }
+            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
 
-    private static string EscapeHtml(string input) =>
-        string.IsNullOrEmpty(input) ? input :
-        input.Replace("&", "&amp;")
-             .Replace("<", "&lt;")
-             .Replace(">", "&gt;")
-             .Replace("\"", "&quot;")
-             .Replace("'", "&#x27;");
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM comments WHERE id = $id";
+            cmd.Parameters.AddWithValue("$id", int.Parse(id));
 
-    private static dynamic ParseQueryParameters(IQueryCollection query)
-    {
-        var where = new List<string>();
-        dynamic parameters = new ExpandoObject();
-        var paramDict = (IDictionary<string, object>)parameters;
+            var rows = await cmd.ExecuteNonQueryAsync();
+            return rows == 0 ? Results.NotFound() : Results.NoContent();
+        });
 
-        foreach (var (key, value) in query)
+        // ===================== USERS (enkel lista, inga lösenord) =====================
+
+        App.MapGet("/api/users", async () =>
         {
-            if (key.StartsWith("_") || string.IsNullOrEmpty(value.ToString())) continue;
-            var paramKey = key.Replace(".", "_");
-            where.Add($"{key} = ${paramKey}");
-            paramDict[paramKey] = value.ToString();
-        }
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT id, username, role, created FROM users ORDER BY id";
 
-        var sql = where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : "";
-        return new { sql, parameters };
+            var list = new List<object>();
+            using var r = await cmd.ExecuteReaderAsync();
+            while (await r.ReadAsync())
+            {
+                list.Add(new
+                {
+                    id = r.GetInt32(0),
+                    username = r.GetString(1),
+                    role = r.GetString(2),
+                    created = r.GetString(3)
+                });
+            }
+            return Results.Ok(list);
+        });
     }
 }
