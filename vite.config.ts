@@ -1,3 +1,4 @@
+// vite.config.ts
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -7,7 +8,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:5000', // backend
+        // Använd IPv4 explicit för att undvika ::1 (IPv6) problem
+        target: 'http://127.0.0.1:5002',
         changeOrigin: true,
       },
     },

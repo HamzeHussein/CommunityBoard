@@ -1,26 +1,24 @@
 #nullable enable
-using System.Text.RegularExpressions;
-using Microsoft.Data.Sqlite;
-using System.Security.Cryptography;
 using System.Text;
-using BCrypt.Net; // installera paketet BCrypt.Net-Next via NuGet
+using System.Text.RegularExpressions;
+using System.Security.Cryptography;
+using Microsoft.Data.Sqlite;
 
 namespace WebApp;
 
 public static class RestApi
 {
+    // === Validering ===
     private static readonly Regex SafeCategory = new(@"^[a-zA-Z0-9\s\-_]{1,64}$", RegexOptions.Compiled);
+    private static readonly Regex SafeUsername = new(@"^[a-zA-Z0-9_\-\.]{3,32}$", RegexOptions.Compiled);
 
     // === Databasplacering: backend/data/_db.sqlite3 ===
-    private static string DbDir
-        => Path.Combine(App.Environment.ContentRootPath, "data");   // <projekt>/backend/data
-    private static string DbPath
-        => Path.Combine(DbDir, "_db.sqlite3");
+    private static string DbDir => Path.Combine(App.Environment.ContentRootPath, "data");
+    private static string DbPath => Path.Combine(DbDir, "_db.sqlite3");
 
     private static void EnsureDbDirectory()
     {
-        if (!Directory.Exists(DbDir))
-            Directory.CreateDirectory(DbDir);
+        if (!Directory.Exists(DbDir)) Directory.CreateDirectory(DbDir);
     }
 
     private static SqliteConnection GetConn()
@@ -34,15 +32,16 @@ public static class RestApi
         return new SqliteConnection(cs);
     }
 
-    // === AUTH Helpers ===
+    // === AUTH DTOs & Cookie ===
     private record AuthRequest(string username, string password);
     private record CurrentUser(string Username, string Role)
     {
         public bool IsAdmin => Role == "admin";
     }
     private const string AUTH_COOKIE = "auth";
-    private static readonly byte[] SECRET = Encoding.UTF8.GetBytes("demo-secret");
+    private static readonly byte[] SECRET = Encoding.UTF8.GetBytes("demo-secret"); // byt i skarp
 
+    // === Cookie signering (HMAC) ===
     private static string Sign(string data)
     {
         using var h = new HMACSHA256(SECRET);
@@ -68,16 +67,46 @@ public static class RestApi
 
     private static bool TryGetUser(HttpContext ctx, out CurrentUser user)
     {
-        user = new CurrentUser("", "");
         var cookie = ctx.Request.Cookies[AUTH_COOKIE];
         return TryParseAuthCookie(cookie, out user);
     }
 
-    private static bool CheckPassword(string raw, string stored)
-        => BCrypt.Net.BCrypt.Verify(raw, stored);
+    // === Lösenordshashning (PBKDF2) ===
+    // Format: pbkdf2$<iterations>$<saltB64>$<hashB64>
+    private static string HashPassword(string password, int iterations = 100_000)
+    {
+        using var rng = RandomNumberGenerator.Create();
+        var salt = new byte[16];
+        rng.GetBytes(salt);
 
-    private static string HashPassword(string raw)
-        => BCrypt.Net.BCrypt.HashPassword(raw);
+        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256);
+        var hash = pbkdf2.GetBytes(32);
+
+        return $"pbkdf2${iterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
+    }
+
+    private static bool VerifyPassword(string raw, string stored)
+    {
+        // Stöd legacy (plaintext i seed) så inget brakar under uppgradering
+        if (!stored.StartsWith("pbkdf2$", StringComparison.Ordinal))
+            return raw == stored;
+
+        try
+        {
+            var parts = stored.Split('$');
+            var iterations = int.Parse(parts[1]);
+            var salt = Convert.FromBase64String(parts[2]);
+            var expected = Convert.FromBase64String(parts[3]);
+
+            using var pbkdf2 = new Rfc2898DeriveBytes(raw, salt, iterations, HashAlgorithmName.SHA256);
+            var candidate = pbkdf2.GetBytes(expected.Length);
+            return CryptographicOperations.FixedTimeEquals(candidate, expected);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     // === Schema & Seed ===
     private static void EnsureSchema()
@@ -124,7 +153,7 @@ public static class RestApi
             cmd.ExecuteNonQuery();
         }
 
-        // View med comment_count
+        // View: posts + antal kommentarer
         using (var v = conn.CreateCommand())
         {
             v.CommandText = """
@@ -138,26 +167,29 @@ public static class RestApi
             v.ExecuteNonQuery();
         }
 
-        // Seed
+        // Seed användare (hashade lösenord)
         using (var check = conn.CreateCommand())
         {
             check.CommandText = "SELECT COUNT(*) FROM users";
             var usersCount = Convert.ToInt32(check.ExecuteScalar());
             if (usersCount == 0)
             {
+                var adminHash = HashPassword("admin");
+                var userHash = HashPassword("user");
+
                 using var seed = conn.CreateCommand();
                 seed.CommandText = """
                     INSERT OR IGNORE INTO users (username, password_hash, role)
-                    VALUES ($admin, $adminPass, 'admin'),
-                           ($user, $userPass, 'user');
+                    VALUES ($aUser, $aHash, 'admin'),
+                           ($uUser, $uHash, 'user');
 
                     INSERT INTO posts (title, content, author, category)
                     VALUES ('Välkommen', 'Första inlägget – systemet är igång!', 'admin', 'info');
                     """;
-                seed.Parameters.AddWithValue("$admin", "admin");
-                seed.Parameters.AddWithValue("$adminPass", HashPassword("admin"));
-                seed.Parameters.AddWithValue("$user", "user");
-                seed.Parameters.AddWithValue("$userPass", HashPassword("user"));
+                seed.Parameters.AddWithValue("$aUser", "admin");
+                seed.Parameters.AddWithValue("$aHash", adminHash);
+                seed.Parameters.AddWithValue("$uUser", "user");
+                seed.Parameters.AddWithValue("$uHash", userHash);
                 seed.ExecuteNonQuery();
             }
         }
@@ -176,12 +208,13 @@ public static class RestApi
     private static bool IsValidContent(string? c) => !string.IsNullOrWhiteSpace(c) && c!.Length <= 10_000;
     private static bool IsValidCategory(string? c) => !string.IsNullOrWhiteSpace(c) && SafeCategory.IsMatch(c!);
 
+    // DTOs
     private record PostDto(int id, string title, string content, string author, string category, string created, string? updated);
     private record PostCreateDto(string title, string content, string author, string category);
     private record CommentDto(int id, int post_id, string author, string content, string created);
     private record CommentCreateDto(string author, string content);
 
-    // === Helpers ===
+    // Hjälp: ägar/roll-koll
     private static async Task<bool> IsOwnerOrAdmin(SqliteConnection conn, string postId, CurrentUser u)
     {
         if (u.IsAdmin) return true;
@@ -200,7 +233,44 @@ public static class RestApi
         App.MapGet("/api/health", () =>
             Results.Ok(new { ok = true, time = DateTime.UtcNow, db = DbPath, exists = File.Exists(DbPath) }));
 
-        // AUTH
+        // ============== AUTH ==============
+        // Register (skapa konto)
+        App.MapPost("/api/auth/register", async (AuthRequest req) =>
+        {
+            var username = (req.username ?? "").Trim();
+            var password = req.password ?? "";
+
+            if (!SafeUsername.IsMatch(username))
+                return Results.BadRequest(new { error = "Ogiltigt användarnamn (3–32 tecken, a-z, 0-9, _-.)." });
+            if (password.Length < 4 || password.Length > 128)
+                return Results.BadRequest(new { error = "Ogiltigt lösenord (4–128 tecken)." });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+
+            // Finns redan?
+            using (var chk = conn.CreateCommand())
+            {
+                chk.CommandText = "SELECT 1 FROM users WHERE username=$u";
+                chk.Parameters.AddWithValue("$u", username);
+                var exists = await chk.ExecuteScalarAsync();
+                if (exists != null) return Results.Conflict(new { error = "Användarnamnet är upptaget." });
+            }
+
+            // Skapa hash & spara som vanlig user
+            var hash = HashPassword(password);
+            using (var ins = conn.CreateCommand())
+            {
+                ins.CommandText = "INSERT INTO users (username, password_hash, role) VALUES ($u,$h,'user')";
+                ins.Parameters.AddWithValue("$u", username);
+                ins.Parameters.AddWithValue("$h", hash);
+                await ins.ExecuteNonQueryAsync();
+            }
+
+            return Results.Created($"/api/users/{username}", new { username, role = "user" });
+        });
+
+        // Login
         App.MapPost("/api/auth/login", async (HttpContext ctx, AuthRequest req) =>
         {
             using var conn = GetConn();
@@ -212,45 +282,26 @@ public static class RestApi
             if (!await r.ReadAsync()) return Results.Unauthorized();
 
             var username = r.GetString(0);
-            var hash = r.GetString(1);
+            var storedHash = r.GetString(1);
             var role = r.GetString(2);
-            if (!CheckPassword(req.password, hash)) return Results.Unauthorized();
+            if (!VerifyPassword(req.password, storedHash)) return Results.Unauthorized();
 
             var value = Sign($"{username}|{role}");
-            ctx.Response.Cookies.Append(AUTH_COOKIE, value,
-                new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Lax, Secure = false, Path = "/" });
+            ctx.Response.Cookies.Append(
+                AUTH_COOKIE,
+                value,
+                new CookieOptions
+                {
+                    HttpOnly = true,
+                    SameSite = SameSiteMode.Lax,
+                    Secure = false,
+                    Path = "/"
+                });
+
             return Results.Ok(new { username, role });
         });
 
-        App.MapPost("/api/auth/register", async (AuthRequest req) =>
-        {
-            var username = Sanitize(req.username);
-            var password = req.password?.Trim();
-            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
-                return Results.BadRequest(new { error = "Username/password required" });
-
-            using var conn = GetConn();
-            await conn.OpenAsync();
-
-            using (var check = conn.CreateCommand())
-            {
-                check.CommandText = "SELECT 1 FROM users WHERE username=$u";
-                check.Parameters.AddWithValue("$u", username);
-                var exists = await check.ExecuteScalarAsync();
-                if (exists != null) return Results.BadRequest(new { error = "User already exists" });
-            }
-
-            using (var ins = conn.CreateCommand())
-            {
-                ins.CommandText = "INSERT INTO users (username, password_hash, role) VALUES ($u, $p, 'user')";
-                ins.Parameters.AddWithValue("$u", username);
-                ins.Parameters.AddWithValue("$p", HashPassword(password));
-                await ins.ExecuteNonQueryAsync();
-            }
-
-            return Results.Ok(new { username, role = "user" });
-        });
-
+        // Current user
         App.MapGet("/api/auth/me", (HttpContext ctx) =>
         {
             return TryGetUser(ctx, out var u)
@@ -258,13 +309,14 @@ public static class RestApi
                 : Results.Unauthorized();
         });
 
+        // Logout
         App.MapPost("/api/auth/logout", (HttpContext ctx) =>
         {
             ctx.Response.Cookies.Delete(AUTH_COOKIE, new CookieOptions { Path = "/" });
             return Results.Ok(new { ok = true });
         });
 
-        // ===================== POSTS =====================
+        // ============== POSTS ==============
         App.MapGet("/api/posts", async (HttpRequest req) =>
         {
             var q = req.Query;
@@ -299,9 +351,11 @@ public static class RestApi
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                list.Add(new PostDto(r.GetInt32(0), r.GetString(1), r.GetString(2),
+                list.Add(new PostDto(
+                    r.GetInt32(0), r.GetString(1), r.GetString(2),
                     r.GetString(3), r.GetString(4), r.GetString(5),
-                    r.IsDBNull(6) ? null : r.GetString(6)));
+                    r.IsDBNull(6) ? null : r.GetString(6)
+                ));
             }
             return Results.Ok(list);
         });
@@ -312,7 +366,7 @@ public static class RestApi
             var content = Sanitize(incoming.content);
             var author = Sanitize(incoming.author);
             var category = Sanitize(incoming.category);
-            if (TryGetUser(ctx, out var u)) author = u.Username;
+            if (TryGetUser(ctx, out var u)) author = u.Username; // author från session
 
             if (!IsValidTitle(title) || !IsValidContent(content) || !IsValidAuthor(author) || !IsValidCategory(category))
                 return Results.BadRequest(new { error = "Invalid input" });
@@ -379,7 +433,7 @@ public static class RestApi
             return rows == 0 ? Results.NotFound() : Results.NoContent();
         });
 
-        // ===================== COMMENTS =====================
+        // ============== COMMENTS ==============
         App.MapGet("/api/posts/{postId}/comments", async (string postId) =>
         {
             if (!IsValidId(postId)) return Results.BadRequest(new { error = "Invalid post id" });
@@ -451,26 +505,24 @@ public static class RestApi
             return Results.Created($"/api/comments/{id}", new { id });
         });
 
-        // DELETE kommentar — nu admin-only
+        // DELETE kommentar — admin-only
         App.MapDelete("/api/comments/{id}", async (HttpContext ctx, string id) =>
         {
-            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid comment id" });
+            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
             if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
 
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM comments WHERE id=$id";
+            cmd.CommandText = "DELETE FROM comments WHERE id = $id";
             cmd.Parameters.AddWithValue("$id", int.Parse(id));
             var rows = await cmd.ExecuteNonQueryAsync();
             return rows == 0 ? Results.NotFound() : Results.NoContent();
         });
 
-        // ===================== USERS =====================
-        App.MapGet("/api/users", async (HttpContext ctx) =>
+        // ============== USERS ==============
+        App.MapGet("/api/users", async () =>
         {
-            if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
-
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
@@ -479,29 +531,18 @@ public static class RestApi
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                list.Add(new
-                {
-                    id = r.GetInt32(0),
-                    username = r.GetString(1),
-                    role = r.GetString(2),
-                    created = r.GetString(3)
-                });
+                list.Add(new { id = r.GetInt32(0), username = r.GetString(1), role = r.GetString(2), created = r.GetString(3) });
             }
             return Results.Ok(list);
         });
 
-        // ===================== VIEW endpoint =====================
+        // ============== VIEW endpoint ==============
         App.MapGet("/api/posts/with-count", async () =>
         {
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                SELECT id, title, author, category, created, updated, comment_count
-                FROM v_posts_with_comment_count
-                ORDER BY datetime(created) DESC
-                """;
-
+            cmd.CommandText = "SELECT id,title,author,category,created,updated,comment_count FROM v_posts_with_comment_count ORDER BY datetime(created) DESC";
             var list = new List<object>();
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
@@ -520,61 +561,60 @@ public static class RestApi
             return Results.Ok(list);
         });
 
-        // ===================== EXPORT (ADMIN-ONLY) =====================
-        App.MapGet("/api/export/json", async (HttpContext ctx) =>
+        // ============== EXPORT (ADMIN-ONLY) ==============
+        App.MapGet("/api/export/posts.json", async (HttpContext ctx) =>
         {
             if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
 
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id, title, content, author, category, created, updated FROM posts";
-            var list = new List<PostDto>();
+            cmd.CommandText = "SELECT id,title,content,author,category,created,updated FROM posts ORDER BY id";
+            var rows = new List<object>();
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                list.Add(new PostDto(r.GetInt32(0), r.GetString(1), r.GetString(2),
-                    r.GetString(3), r.GetString(4), r.GetString(5),
-                    r.IsDBNull(6) ? null : r.GetString(6)));
+                rows.Add(new
+                {
+                    id = r.GetInt32(0),
+                    title = r.GetString(1),
+                    content = r.GetString(2),
+                    author = r.GetString(3),
+                    category = r.GetString(4),
+                    created = r.GetString(5),
+                    updated = r.IsDBNull(6) ? null : r.GetString(6)
+                });
             }
-            return Results.Ok(list);
+            var json = System.Text.Json.JsonSerializer.Serialize(rows);
+            var bytes = Encoding.UTF8.GetBytes(json);
+            return Results.File(bytes, "application/json", "posts.json");
         });
 
-        App.MapGet("/api/export/csv", async (HttpContext ctx) =>
+        App.MapGet("/api/export/posts.csv", async (HttpContext ctx) =>
         {
             if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
 
+            static string CsvEscape(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id, title, content, author, category, created, updated FROM posts";
+            cmd.CommandText = "SELECT id,title,content,author,category,created,COALESCE(updated,'') FROM posts ORDER BY id";
             var sb = new StringBuilder();
             sb.AppendLine("id,title,content,author,category,created,updated");
-
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                var line = string.Join(",", new[]
-                {
-                    r.GetInt32(0).ToString(),
-                    EscapeCsv(r.GetString(1)),
-                    EscapeCsv(r.GetString(2)),
-                    EscapeCsv(r.GetString(3)),
-                    EscapeCsv(r.GetString(4)),
-                    r.GetString(5),
-                    r.IsDBNull(6) ? "" : r.GetString(6)
-                });
-                sb.AppendLine(line);
+                sb.Append(r.GetInt32(0)).Append(",");
+                sb.Append(CsvEscape(r.GetString(1))).Append(",");
+                sb.Append(CsvEscape(r.GetString(2))).Append(",");
+                sb.Append(CsvEscape(r.GetString(3))).Append(",");
+                sb.Append(CsvEscape(r.GetString(4))).Append(",");
+                sb.Append(CsvEscape(r.GetString(5))).Append(",");
+                sb.AppendLine(CsvEscape(r.GetString(6)));
             }
-            return Results.Text(sb.ToString(), "text/csv", Encoding.UTF8);
+            var bytes = Encoding.UTF8.GetBytes(sb.ToString());
+            return Results.File(bytes, "text/csv", "posts.csv");
         });
-    }
-
-    private static string EscapeCsv(string input)
-    {
-        if (input.Contains(",") || input.Contains("\"") || input.Contains("\n"))
-            return $"\"{input.Replace("\"", "\"\"")}\"";
-        return input;
     }
 }
 

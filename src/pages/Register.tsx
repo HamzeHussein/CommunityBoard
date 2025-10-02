@@ -1,14 +1,17 @@
-import { useState, useEffect } from "react";
+// src/pages/Register.tsx
+import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { authApi } from "../utils/api";
 
 export default function Register() {
   const nav = useNavigate();
-  const { user, setUser } = useAuth();
+  const { user, login } = useAuth(); // vi använder login direkt efter registrering
+
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (user) nav("/board", { replace: true });
@@ -16,12 +19,29 @@ export default function Register() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
+    setLoading(true);
+
     try {
-      const newUser = await authApi.register(username, password);
-      setUser(newUser);
-      nav("/board");
+      // Här måste backend ha ett register-endpoint
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || "Kunde inte skapa användare");
+      }
+
+      // Efter lyckad registrering → logga in användaren
+      await login(username, password);
+      nav("/board", { replace: true });
     } catch (err: any) {
-      setError(err.message || "Registrering misslyckades");
+      setError(err.message || "Något gick fel");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -56,13 +76,17 @@ export default function Register() {
               />
             </div>
 
-            <button type="submit" className="btn btn-primary w-100">
-              Registrera
+            <button
+              type="submit"
+              className="btn btn-primary w-100"
+              disabled={loading}
+            >
+              {loading ? "Skapar konto..." : "Registrera"}
             </button>
           </form>
 
           <div className="mt-3">
-            Har du redan konto? <Link to="/login">Logga in här</Link>
+            Har du redan ett konto? <Link to="/login">Logga in här</Link>
           </div>
         </div>
       </div>
@@ -70,4 +94,5 @@ export default function Register() {
   );
 }
 
+// Route-metadata
 (Register as any).route = { path: "/register", parent: "/" };
