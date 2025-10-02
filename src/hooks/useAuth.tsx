@@ -11,6 +11,7 @@ import { authApi, type AuthUser } from "../utils/api";
 // Typ för contexten
 type AuthContextType = {
   user: AuthUser | null;
+  setUser: (user: AuthUser | null) => void; // ✅ lägg till denna
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -53,7 +54,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, refresh }}>
+    <AuthContext.Provider
+      value={{ user, setUser, loading, login, logout, refresh }} // ✅ expose setUser
+    >
       {children}
     </AuthContext.Provider>
   );

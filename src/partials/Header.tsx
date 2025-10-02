@@ -1,4 +1,3 @@
-// src/partials/Header.tsx
 import { useState, useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Container, Nav, Navbar } from 'react-bootstrap';
@@ -12,7 +11,7 @@ type AnyRoute = {
   parent?: string;
 };
 
-export default function Header() {
+export default function Header({ appName = "CommunityHub" }: { appName?: string }) {
   const [expanded, setExpanded] = useState(false);
   const { user, logout } = useAuth();
 
@@ -44,13 +43,14 @@ export default function Header() {
       <Navbar
         expanded={expanded}
         expand="md"
-        className="bg-primary"
+        className="bg-primary shadow-sm"
         data-bs-theme="dark"
         fixed="top"
       >
         <Container fluid>
-          <Navbar.Brand className="me-5" as={Link} to="/">
-            My webapp
+          {/* App-namn */}
+          <Navbar.Brand className="fw-bold fs-4 text-light" as={Link} to="/">
+            {appName}
           </Navbar.Brand>
 
           <Navbar.Toggle onClick={() => setExpanded(!expanded)} />

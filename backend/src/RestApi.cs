@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 using System.Text;
+using BCrypt.Net; // installera paketet BCrypt.Net-Next via NuGet
 
 namespace WebApp;
 
@@ -72,7 +73,11 @@ public static class RestApi
         return TryParseAuthCookie(cookie, out user);
     }
 
-    private static bool CheckPassword(string raw, string stored) => raw == stored; // demo
+    private static bool CheckPassword(string raw, string stored)
+        => BCrypt.Net.BCrypt.Verify(raw, stored);
+
+    private static string HashPassword(string raw)
+        => BCrypt.Net.BCrypt.HashPassword(raw);
 
     // === Schema & Seed ===
     private static void EnsureSchema()
@@ -143,12 +148,16 @@ public static class RestApi
                 using var seed = conn.CreateCommand();
                 seed.CommandText = """
                     INSERT OR IGNORE INTO users (username, password_hash, role)
-                    VALUES ('admin', 'admin', 'admin'),
-                           ('user', 'user', 'user');
+                    VALUES ($admin, $adminPass, 'admin'),
+                           ($user, $userPass, 'user');
 
                     INSERT INTO posts (title, content, author, category)
                     VALUES ('Välkommen', 'Första inlägget – systemet är igång!', 'admin', 'info');
                     """;
+                seed.Parameters.AddWithValue("$admin", "admin");
+                seed.Parameters.AddWithValue("$adminPass", HashPassword("admin"));
+                seed.Parameters.AddWithValue("$user", "user");
+                seed.Parameters.AddWithValue("$userPass", HashPassword("user"));
                 seed.ExecuteNonQuery();
             }
         }
@@ -211,6 +220,35 @@ public static class RestApi
             ctx.Response.Cookies.Append(AUTH_COOKIE, value,
                 new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Lax, Secure = false, Path = "/" });
             return Results.Ok(new { username, role });
+        });
+
+        App.MapPost("/api/auth/register", async (AuthRequest req) =>
+        {
+            var username = Sanitize(req.username);
+            var password = req.password?.Trim();
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                return Results.BadRequest(new { error = "Username/password required" });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+
+            using (var check = conn.CreateCommand())
+            {
+                check.CommandText = "SELECT 1 FROM users WHERE username=$u";
+                check.Parameters.AddWithValue("$u", username);
+                var exists = await check.ExecuteScalarAsync();
+                if (exists != null) return Results.BadRequest(new { error = "User already exists" });
+            }
+
+            using (var ins = conn.CreateCommand())
+            {
+                ins.CommandText = "INSERT INTO users (username, password_hash, role) VALUES ($u, $p, 'user')";
+                ins.Parameters.AddWithValue("$u", username);
+                ins.Parameters.AddWithValue("$p", HashPassword(password));
+                await ins.ExecuteNonQueryAsync();
+            }
+
+            return Results.Ok(new { username, role = "user" });
         });
 
         App.MapGet("/api/auth/me", (HttpContext ctx) =>
@@ -413,23 +451,26 @@ public static class RestApi
             return Results.Created($"/api/comments/{id}", new { id });
         });
 
-        App.MapDelete("/api/comments/{id}", async (string id) =>
+        // DELETE kommentar — nu admin-only
+        App.MapDelete("/api/comments/{id}", async (HttpContext ctx, string id) =>
         {
-            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
+            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid comment id" });
+            if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
 
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM comments WHERE id = $id";
+            cmd.CommandText = "DELETE FROM comments WHERE id=$id";
             cmd.Parameters.AddWithValue("$id", int.Parse(id));
-
             var rows = await cmd.ExecuteNonQueryAsync();
             return rows == 0 ? Results.NotFound() : Results.NoContent();
         });
 
         // ===================== USERS =====================
-        App.MapGet("/api/users", async () =>
+        App.MapGet("/api/users", async (HttpContext ctx) =>
         {
+            if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
+
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
@@ -438,7 +479,13 @@ public static class RestApi
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                list.Add(new { id = r.GetInt32(0), username = r.GetString(1), role = r.GetString(2), created = r.GetString(3) });
+                list.Add(new
+                {
+                    id = r.GetInt32(0),
+                    username = r.GetString(1),
+                    role = r.GetString(2),
+                    created = r.GetString(3)
+                });
             }
             return Results.Ok(list);
         });
@@ -449,7 +496,12 @@ public static class RestApi
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id,title,author,category,created,updated,comment_count FROM v_posts_with_comment_count ORDER BY datetime(created) DESC";
+            cmd.CommandText = """
+                SELECT id, title, author, category, created, updated, comment_count
+                FROM v_posts_with_comment_count
+                ORDER BY datetime(created) DESC
+                """;
+
             var list = new List<object>();
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
@@ -468,55 +520,61 @@ public static class RestApi
             return Results.Ok(list);
         });
 
-        // ===================== EXPORT =====================
-        App.MapGet("/api/export/posts.json", async () =>
+        // ===================== EXPORT (ADMIN-ONLY) =====================
+        App.MapGet("/api/export/json", async (HttpContext ctx) =>
         {
+            if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
+
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id,title,content,author,category,created,updated FROM posts ORDER BY id";
-            var rows = new List<object>();
+            cmd.CommandText = "SELECT id, title, content, author, category, created, updated FROM posts";
+            var list = new List<PostDto>();
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                rows.Add(new
-                {
-                    id = r.GetInt32(0),
-                    title = r.GetString(1),
-                    content = r.GetString(2),
-                    author = r.GetString(3),
-                    category = r.GetString(4),
-                    created = r.GetString(5),
-                    updated = r.IsDBNull(6) ? null : r.GetString(6)
-                });
+                list.Add(new PostDto(r.GetInt32(0), r.GetString(1), r.GetString(2),
+                    r.GetString(3), r.GetString(4), r.GetString(5),
+                    r.IsDBNull(6) ? null : r.GetString(6)));
             }
-            var json = System.Text.Json.JsonSerializer.Serialize(rows);
-            var bytes = Encoding.UTF8.GetBytes(json);
-            return Results.File(bytes, "application/json", "posts.json");
+            return Results.Ok(list);
         });
 
-        App.MapGet("/api/export/posts.csv", async () =>
+        App.MapGet("/api/export/csv", async (HttpContext ctx) =>
         {
-            static string CsvEscape(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
+            if (!TryGetUser(ctx, out var u) || !u.IsAdmin) return Results.Forbid();
+
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id,title,content,author,category,created,COALESCE(updated,'') FROM posts ORDER BY id";
+            cmd.CommandText = "SELECT id, title, content, author, category, created, updated FROM posts";
             var sb = new StringBuilder();
             sb.AppendLine("id,title,content,author,category,created,updated");
+
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                sb.Append(r.GetInt32(0)).Append(",");
-                sb.Append(CsvEscape(r.GetString(1))).Append(",");
-                sb.Append(CsvEscape(r.GetString(2))).Append(",");
-                sb.Append(CsvEscape(r.GetString(3))).Append(",");
-                sb.Append(CsvEscape(r.GetString(4))).Append(",");
-                sb.Append(CsvEscape(r.GetString(5))).Append(",");
-                sb.AppendLine(CsvEscape(r.GetString(6)));
+                var line = string.Join(",", new[]
+                {
+                    r.GetInt32(0).ToString(),
+                    EscapeCsv(r.GetString(1)),
+                    EscapeCsv(r.GetString(2)),
+                    EscapeCsv(r.GetString(3)),
+                    EscapeCsv(r.GetString(4)),
+                    r.GetString(5),
+                    r.IsDBNull(6) ? "" : r.GetString(6)
+                });
+                sb.AppendLine(line);
             }
-            var bytes = Encoding.UTF8.GetBytes(sb.ToString());
-            return Results.File(bytes, "text/csv", "posts.csv");
+            return Results.Text(sb.ToString(), "text/csv", Encoding.UTF8);
         });
     }
+
+    private static string EscapeCsv(string input)
+    {
+        if (input.Contains(",") || input.Contains("\"") || input.Contains("\n"))
+            return $"\"{input.Replace("\"", "\"\"")}\"";
+        return input;
+    }
 }
+
