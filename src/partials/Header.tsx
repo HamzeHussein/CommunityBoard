@@ -1,8 +1,8 @@
-import { useState, useMemo } from 'react';
-import { Link, useLocation } from 'react-router-dom';
-import { Container, Nav, Navbar } from 'react-bootstrap';
-import routes from '../routes';
-import { useAuth } from '../hooks/useAuth';
+import { useMemo, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { Container, Nav, Navbar } from "react-bootstrap";
+import routes from "../routes";
+import { useAuth } from "../hooks/useAuth";
 
 type AnyRoute = {
   path?: string;
@@ -11,35 +11,27 @@ type AnyRoute = {
   parent?: string;
 };
 
-export default function Header({ appName = "CommunityHub" }: { appName?: string }) {
-  const [expanded, setExpanded] = useState(false);
+type HeaderProps = {
+  appName?: string;
+};
+
+export default function Header({ appName = "CommunityHub" }: HeaderProps) {
   const { user, logout } = useAuth();
+  const [expanded, setExpanded] = useState(false);
+  const location = useLocation();
 
-  const allRoutes: AnyRoute[] = Array.isArray(routes) ? (routes as AnyRoute[]) : [];
-  const pathName = useLocation().pathname;
-
-  const currentRoute = useMemo(() => {
-    return allRoutes
-      .filter(r => typeof r?.path === 'string' && r.path!.length > 0)
-      .slice()
-      .sort((a, b) => (b.path!.length) - (a.path!.length))
-      .find(r => {
-        const base = String(r.path).split(':')[0];
-        return base && pathName.indexOf(base) === 0;
-      });
-  }, [allRoutes, pathName]);
+  const menuItems: AnyRoute[] = useMemo(() => {
+    const arr = Array.isArray(routes) ? (routes as AnyRoute[]) : [];
+    return arr
+      .filter((r) => !!r?.menuLabel && typeof r?.path === "string")
+      .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  }, []);
 
   const isActive = (path?: string) =>
-    !!path && (path === currentRoute?.path || path === currentRoute?.parent);
-
-  const menuItems = useMemo(() => {
-    return allRoutes
-      .filter(r => !!r?.menuLabel && typeof r?.path === 'string')
-      .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-  }, [allRoutes]);
+    !!path && (location.pathname === path || location.pathname.startsWith(`${path}/`));
 
   return (
-    <header>
+    <header className="app-header">
       <Navbar
         expanded={expanded}
         expand="md"
@@ -48,52 +40,69 @@ export default function Header({ appName = "CommunityHub" }: { appName?: string 
         fixed="top"
       >
         <Container fluid>
-          {/* App-namn */}
-          <Navbar.Brand className="fw-bold fs-4 text-light" as={Link} to="/">
-            {appName}
+          <Navbar.Brand as={Link} to="/" className="fw-bold d-flex align-items-center gap-2">
+            <span className="logo-bubble">💬</span>
+            <span className="logo-text">{appName}</span>
           </Navbar.Brand>
 
-          <Navbar.Toggle onClick={() => setExpanded(!expanded)} />
+          <Navbar.Toggle
+            aria-controls="main-nav"
+            onClick={() => setExpanded((x) => !x)}
+          />
 
-          <Navbar.Collapse id="basic-navbar-nav">
+          <Navbar.Collapse id="main-nav">
             <Nav className="me-auto">
-              {menuItems.map(({ menuLabel, path }, i) => (
+              {menuItems.map(({ path, menuLabel }, i) => (
                 <Nav.Link
                   as={Link}
                   key={`${path}-${i}`}
                   to={path as string}
-                  className={isActive(path) ? 'active' : ''}
-                  onClick={() => setTimeout(() => setExpanded(false), 200)}
+                  className={isActive(path) ? "active" : ""}
+                  onClick={() => setTimeout(() => setExpanded(false), 150)}
                 >
                   {menuLabel}
                 </Nav.Link>
               ))}
             </Nav>
 
-            {/* Auth-del till höger */}
-            <Nav>
+            <Nav className="align-items-center gap-2">
               {user ? (
                 <>
-                  <Nav.Item className="me-3 text-light">
-                    Hej, <strong>{user.username}</strong> ({user.role})
-                  </Nav.Item>
+                  <span className="navbar-text small text-light">
+                    Hej, <strong>{user.username}</strong>
+                  </span>
+                  <span
+                    className={`badge ${user.role === "admin" ? "text-bg-warning" : "text-bg-light"
+                      }`}
+                    title={`Roll: ${user.role}`}
+                  >
+                    {user.role}
+                  </span>
                   <Nav.Link
                     as="button"
+                    className="btn btn-sm btn-outline-light ms-2"
                     onClick={() => {
                       logout();
                       setExpanded(false);
                     }}
-                    className="btn btn-sm btn-outline-light"
                   >
                     Logga ut
                   </Nav.Link>
                 </>
               ) : (
                 <>
-                  <Nav.Link as={Link} to="/login" onClick={() => setExpanded(false)}>
+                  <Nav.Link
+                    as={Link}
+                    to="/login"
+                    onClick={() => setTimeout(() => setExpanded(false), 150)}
+                  >
                     Logga in
                   </Nav.Link>
-                  <Nav.Link as={Link} to="/register" onClick={() => setExpanded(false)}>
+                  <Nav.Link
+                    as={Link}
+                    to="/register"
+                    onClick={() => setTimeout(() => setExpanded(false), 150)}
+                  >
                     Registrera
                   </Nav.Link>
                 </>
@@ -102,6 +111,8 @@ export default function Header({ appName = "CommunityHub" }: { appName?: string 
           </Navbar.Collapse>
         </Container>
       </Navbar>
+
+      <div style={{ height: "64px" }} />
     </header>
   );
 }
