@@ -1,12 +1,13 @@
 import type { JSX } from "react";
 import { createElement } from "react";
 
-// Pages
+// Sidor
+import NotFoundPage from "./pages/NotFoundPage";
 import Start from "./pages/Start";
 import Board from "./pages/Board";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
-import NotFoundPage from "./pages/NotFoundPage";
+import Profile from "./pages/Profile";
 
 interface Route {
   element: JSX.Element;
@@ -18,17 +19,12 @@ interface Route {
 }
 
 export default [
+  NotFoundPage,
   Start,
   Board,
   Login,
   Register,
-  NotFoundPage,
+  Profile,
 ]
-  .map(
-    (x) =>
-    ({
-      element: createElement(x),
-      ...((x as any).route),
-    } as Route)
-  )
+  .map((x) => ({ element: createElement(x), ...((x as any).route) } as Route))
   .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));

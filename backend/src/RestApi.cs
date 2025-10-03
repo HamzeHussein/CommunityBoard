@@ -234,6 +234,7 @@ public static class RestApi
             Results.Ok(new { ok = true, time = DateTime.UtcNow, db = DbPath, exists = File.Exists(DbPath) }));
 
         // ============== AUTH ==============
+
         // Register (skapa konto)
         App.MapPost("/api/auth/register", async (AuthRequest req) =>
         {
@@ -617,4 +618,3 @@ public static class RestApi
         });
     }
 }
-

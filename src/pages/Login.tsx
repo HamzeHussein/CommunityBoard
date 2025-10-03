@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { authApi } from "../utils/api";
 import { useAuth } from "../hooks/useAuth";
 
@@ -23,7 +23,7 @@ export default function Login() {
     setError(null);
     try {
       await authApi.login(username.trim(), password);
-      await refresh();           // uppdatera auth-context
+      await refresh(); // uppdatera auth-context
       nav("/board", { replace: true });
     } catch (err: any) {
       setError(err?.message || "Inloggning misslyckades.");
@@ -63,10 +63,16 @@ export default function Login() {
               />
             </div>
 
-            <button className="btn btn-primary" disabled={submitting}>
+            <button className="btn btn-primary w-100" disabled={submitting}>
               {submitting ? "Loggar in…" : "Logga in"}
             </button>
           </form>
+
+          <div className="mt-3">
+            <small className="text-muted">
+              Har du inget konto? <Link to="/register">Registrera här</Link>
+            </small>
+          </div>
 
           <hr className="my-4" />
           <small className="text-muted">
@@ -81,4 +87,3 @@ export default function Login() {
 
 // Route-metadata (ingen menylänk)
 ; (Login as any).route = { path: "/login", parent: "/" };
-

@@ -6,7 +6,7 @@ import { authApi } from "../utils/api";
 
 export default function Register() {
   const nav = useNavigate();
-  const { user, login } = useAuth(); // vi använder login direkt efter registrering
+  const { user, login } = useAuth(); // logga in direkt efter registrering
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -23,23 +23,13 @@ export default function Register() {
     setLoading(true);
 
     try {
-      // Här måste backend ha ett register-endpoint
-      const res = await fetch("/api/auth/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || "Kunde inte skapa användare");
-      }
-
+      // Använd API-wrappern (kräver /api/auth/register i backend)
+      await authApi.register(username.trim(), password);
       // Efter lyckad registrering → logga in användaren
       await login(username, password);
       nav("/board", { replace: true });
     } catch (err: any) {
-      setError(err.message || "Något gick fel");
+      setError(err.message || "Kunde inte skapa användare");
     } finally {
       setLoading(false);
     }
@@ -53,8 +43,8 @@ export default function Register() {
 
           {error && <div className="alert alert-danger">{error}</div>}
 
-          <form onSubmit={handleSubmit}>
-            <div className="mb-3">
+          <form onSubmit={handleSubmit} className="vstack gap-3">
+            <div>
               <label className="form-label">Användarnamn</label>
               <input
                 type="text"
@@ -62,10 +52,11 @@ export default function Register() {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
+                autoComplete="username"
               />
             </div>
 
-            <div className="mb-3">
+            <div>
               <label className="form-label">Lösenord</label>
               <input
                 type="password"
@@ -73,14 +64,11 @@ export default function Register() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
+                autoComplete="new-password"
               />
             </div>
 
-            <button
-              type="submit"
-              className="btn btn-primary w-100"
-              disabled={loading}
-            >
+            <button type="submit" className="btn btn-primary w-100" disabled={loading}>
               {loading ? "Skapar konto..." : "Registrera"}
             </button>
           </form>
@@ -95,4 +83,4 @@ export default function Register() {
 }
 
 // Route-metadata
-(Register as any).route = { path: "/register", parent: "/" };
+; (Register as any).route = { path: "/register", parent: "/" };

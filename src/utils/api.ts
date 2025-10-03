@@ -31,6 +31,7 @@ export type AuthUser = {
 
 const BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || "";
 
+// ---- Generic JSON request
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     credentials: "include",
@@ -56,6 +57,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
+// ---- Blob request (downloads)
 async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
   const res = await fetch(`${BASE_URL}${path}`, {
     credentials: "include",
@@ -80,22 +82,34 @@ export const postsApi = {
     const q = qs.toString();
     return request<Post[]>(`/api/posts${q ? `?${q}` : ""}`);
   },
+
   listWithCount: () => request<Post[]>(`/api/posts/with-count`),
+
   create: (data: Pick<Post, "title" | "content" | "category">) =>
-    request<{ id: number }>(`/api/posts`, { method: "POST", body: JSON.stringify(data) }),
+    request<{ id: number }>(`/api/posts`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
   update: (id: number, data: Partial<Pick<Post, "title" | "content" | "category">>) =>
-    request<void>(`/api/posts/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+    request<void>(`/api/posts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
   delete: (id: number) => request<void>(`/api/posts/${id}`, { method: "DELETE" }),
 };
 
 // === COMMENTS API ===
 export const commentsApi = {
   listByPost: (postId: number) => request<Comment[]>(`/api/posts/${postId}/comments`),
+
   create: (postId: number, data: Pick<Comment, "author" | "content">) =>
     request<{ id: number }>(`/api/posts/${postId}/comments`, {
       method: "POST",
       body: JSON.stringify(data),
     }),
+
   delete: (id: number) => request<void>(`/api/comments/${id}`, { method: "DELETE" }),
 };
 
@@ -106,12 +120,15 @@ export const authApi = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+
   register: (username: string, password: string) =>
     request<AuthUser>(`/api/auth/register`, {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+
   me: () => request<AuthUser>(`/api/auth/me`),
+
   logout: () => request<{ ok: boolean }>(`/api/auth/logout`, { method: "POST" }),
 };
 

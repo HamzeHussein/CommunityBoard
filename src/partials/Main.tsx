@@ -1,8 +1,9 @@
 import { Outlet } from "react-router-dom";
 import { Container } from "react-bootstrap";
 import { useStateObject } from "../utils/useStateObject";
-import "bootstrap/dist/css/bootstrap.min.css";
-import "./sass/index.scss";
+// CSS laddas redan i entry (src/main.tsx)
+// Om du ändå vill ladda din egen SCSS här: 
+// import "../../sass/index.scss"; // från /src/partials upp TVÅ nivåer till /sass
 
 export default function Main() {
   const stateAndSetter = useStateObject({
