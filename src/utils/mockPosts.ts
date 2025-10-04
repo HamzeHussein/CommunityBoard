@@ -1,23 +1,33 @@
 // src/utils/mockPosts.ts
-import type { Post } from './api';
+import type { Post } from "./api";
 
-export const mockPosts: Post[] = [
+function now() {
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+
+const mockPosts: Post[] = [
   {
     id: 1,
-    userId: 10,
-    author: 'Hamze',
-    title: 'Välkommen till Community Board 🚀',
-    content: 'Det här är första inlägget. Allt är på väg att bli fire 🔥',
-    category: 'Nyheter',
-    createdAt: new Date().toISOString(),
+    title: "Välkommen",
+    content: "Första inlägget – systemet är igång!",
+    author: "admin",              // <— använd author (string), inte userId
+    category: "info",
+    created: now(),
+    updated: null,
+    comment_count: 0,
   },
   {
     id: 2,
-    userId: 2,
-    author: 'Admin',
-    title: 'Regler & tips',
-    content: 'Var trevlig, håll trådar on-topic och rapportera spam.',
-    category: 'Diskussion',
-    createdAt: new Date(Date.now() - 86400000).toISOString(), // igår
+    title: "Solidaritet och stöd för Palestina",
+    content:
+      "Den pågående konflikten i Palestina väcker starka känslor världen över...",
+    author: "Hamze1",             // <— använd author (string), inte userId
+    category: "Nyheter",
+    created: now(),
+    updated: null,
+    comment_count: 2,
   },
 ];
+
+export default mockPosts;
+export { mockPosts };
