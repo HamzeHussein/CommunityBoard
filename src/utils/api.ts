@@ -23,11 +23,20 @@ export type User = {
   username: string;
   role: "admin" | "user";
   created: string;
+  email?: string | null;
+  phone?: string | null;
 };
 
 export type AuthUser = {
   username: string;
   role: "admin" | "user";
+};
+
+export type Profile = {
+  username: string;
+  role: "admin" | "user";
+  email?: string | null;
+  phone?: string | null;
 };
 
 // === BASE ===
@@ -163,4 +172,14 @@ export const usersApi = {
 export const exportApi = {
   json: () => requestBlob(`/api/export/posts.json`), // application/json (som fil)
   csv: () => requestBlob(`/api/export/posts.csv`),   // text/csv (som fil)
+};
+
+// === PROFILE API (NYTT) ===
+export const profileApi = {
+  get: () => request<Profile>(`/api/profile`),
+  update: (data: { email?: string; phone?: string }) =>
+    request<void>(`/api/profile`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
 };

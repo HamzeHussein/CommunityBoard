@@ -1,0 +1,87 @@
+:root {
+  --cb-spacing: 1rem;
+
+  --bs-body-bg: #f8fafc;
+  --bs-body-color: #0f172a;
+  --bs-heading-color: #0b1220;
+  --bs-secondary-color: #475569;
+  --bs-border-color: #e2e8f0;
+  --bs-card-bg: #ffffff;
+  --bs-card-color: #0f172a;
+}
+
+/* ===== Mörkt läge – trigga på BÅDE vårt attribut och Bootstrap ===== */
+:root[data-theme="dark"],
+:root[data-bs-theme="dark"] {
+  --bs-body-bg: #0f172a;
+  /* bakgrund */
+  --bs-body-color: #e5e7eb;
+  /* primär text */
+  --bs-heading-color: #f8fafc;
+  /* rubriker */
+  --bs-secondary-color: #cbd5e1;
+  /* muted/lead text - ljusare */
+  --bs-border-color: #334155;
+  --bs-card-bg: #111827;
+  --bs-card-color: #e5e7eb;
+}
+
+/* ===== Grundlayout ===== */
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bs-body-bg);
+  color: var(--bs-body-color);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.display-1,
+.display-2,
+.display-3,
+.display-4,
+.display-5,
+.display-6 {
+  color: var(--bs-heading-color);
+}
+
+:root[data-theme="dark"] .text-muted,
+:root[data-bs-theme="dark"] .text-muted,
+:root[data-theme="dark"] .lead,
+:root[data-bs-theme="dark"] .lead {
+  color: var(--bs-secondary-color) !important;
+  opacity: 1;
+}
+
+.card {
+  background: var(--bs-card-bg);
+  color: var(--bs-card-color);
+  border-color: var(--bs-border-color);
+  margin-bottom: var(--cb-spacing);
+}
+
+/* Om du använder .bg-dark i sektioner – matcha dark-läget */
+:root[data-theme="dark"] .bg-dark,
+:root[data-bs-theme="dark"] .bg-dark {
+  background-color: #111827 !important;
+}
+
+.logo-bubble {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+footer a {
+  text-decoration: none;
+}

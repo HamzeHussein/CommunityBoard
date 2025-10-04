@@ -8,6 +8,7 @@ import Board from "./pages/Board";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Profile from "./pages/Profile";
+import PostPage from "./pages/PostPage"; // detaljer-sida
 
 interface Route {
   element: JSX.Element;
@@ -25,6 +26,7 @@ export default [
   Login,
   Register,
   Profile,
+  PostPage, // ny
 ]
   .map((x) => ({ element: createElement(x), ...((x as any).route) } as Route))
   .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));

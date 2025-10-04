@@ -1,0 +1,21 @@
+/* sass/_theme-light.scss */
+:root {
+  --bg: #ffffff;
+  --fg: #000000;
+  --primary: #0d6efd;
+  --secondary: #6c757d;
+  --accent: #198754;
+  --card-bg: #f8f9fa;
+}
+
+/* Bakgrund & text */
+body.light {
+  background-color: var(--bg);
+  color: var(--fg);
+}
+
+/* Kort, knappar osv */
+.light .card {
+  background-color: var(--card-bg);
+  color: var(--fg);
+}

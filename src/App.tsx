@@ -7,26 +7,30 @@ import Main from "./partials/Main";
 import Footer from "./partials/Footer";
 import BootstrapBreakpoints from "./parts/BootstrapBreakpoints";
 
-// Auth-provider (från src/hooks/useAuth)
+// Auth-provider
 import { AuthProvider } from "./hooks/useAuth";
 
-// slå av/på vid behov
+// Theme-provider
+import ThemeProvider from "./theme/ThemeProvider";
+import "./theme/theme.css";
+
 const showBootstrapBreakpoints = true;
 
 export default function App() {
   const location = useLocation();
 
-  // scrolla upp vid varje ruttbyte
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [location.pathname]);
 
   return (
-    <AuthProvider>
-      <Header />
-      <Main />
-      <Footer />
-      {showBootstrapBreakpoints ? <BootstrapBreakpoints /> : null}
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <Header appName="CommunityHub" />
+        <Main />
+        <Footer />
+        {showBootstrapBreakpoints ? <BootstrapBreakpoints /> : null}
+      </AuthProvider>
+    </ThemeProvider>
   );
 }

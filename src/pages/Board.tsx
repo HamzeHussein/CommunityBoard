@@ -1,5 +1,6 @@
 // src/pages/Board.tsx
 import React, { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { postsApi, commentsApi, type Post, type Comment } from "../utils/api";
 import { useAuth } from "../hooks/useAuth";
 import {
@@ -45,6 +46,9 @@ export default function Board() {
     Record<number, { author: string; content: string }>
   >({});
 
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const canEditPost = useMemo(
     () => (p: Post) => !!user && (user.role === "admin" || user.username === p.author),
     [user]
@@ -52,8 +56,8 @@ export default function Board() {
 
   function fmt(dt?: string | null) {
     if (!dt) return "";
-    const d = new Date(dt.replace(" ", "T"));
-    return isNaN(+d) ? dt : d.toLocaleString();
+    const d = new Date((dt || "").replace(" ", "T"));
+    return isNaN(+d) ? (dt || "") : d.toLocaleString();
   }
 
   function categoryClass(cat?: string) {
@@ -81,14 +85,32 @@ export default function Board() {
       alert("Kunde inte kopiera länk.");
     }
   }
-  const [copiedId, setCopiedId] = useState<number | null>(null);
 
+  // --- Hämta inlägg + merga in comment_count från /with-count ---
   async function fetchPosts() {
     setLoading(true);
     setError(null);
     try {
-      const data = await postsApi.list(search, category);
-      setPosts(data);
+      // 1) Hämta listan (respekterar din sök/filterlogik i postsApi)
+      const list = await postsApi.list(search, category);
+
+      // 2) Hämta alla counts och merga in (så vi får (N) även när sök/filter används)
+      let merged = list;
+      try {
+        const res = await fetch(`/api/posts/with-count`, { credentials: "include" });
+        if (res.ok) {
+          const counts: Array<Pick<Post, "id" | "comment_count">> = await res.json();
+          const map = new Map<number, number>();
+          counts.forEach((p) => {
+            if (typeof p.comment_count === "number") map.set(p.id, p.comment_count);
+          });
+          merged = list.map((p) => ({ ...p, comment_count: map.get(p.id) ?? p.comment_count }));
+        }
+      } catch {
+        // mjuk-fail: om counts inte går att hämta lämnar vi listan som är
+      }
+
+      setPosts(merged);
     } catch (e: any) {
       setError(e?.message ?? "Kunde inte hämta inlägg.");
     } finally {
@@ -100,6 +122,28 @@ export default function Board() {
     fetchPosts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Öppna edit-läge automatiskt om vi kommer från detaljsidan med ?edit=ID
+  useEffect(() => {
+    const edit = searchParams.get("edit");
+    if (loading || !edit) return;
+
+    const id = Number(edit);
+    if (Number.isNaN(id)) return;
+
+    const p = posts.find((x) => x.id === id);
+    if (!p) return;
+
+    startEdit(p);
+
+    setTimeout(() => {
+      document.getElementById(`post-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+
+    const next = new URLSearchParams(searchParams);
+    next.delete("edit");
+    setSearchParams(next, { replace: true });
+  }, [loading, posts, searchParams, setSearchParams]);
 
   function handleSearch() {
     fetchPosts();
@@ -135,14 +179,44 @@ export default function Board() {
     }
   }
 
-  function startEdit(p: Post) {
+  // --- Edit ---
+  async function startEdit(p: Post) {
     setEditingId(p.id);
-    setEditForm({ title: p.title, category: p.category, content: p.content });
+
+    let title = p.title;
+    let category = p.category ?? "";
+    let content = p.content ?? "";
+
+    if (!content || content.trim() === "") {
+      try {
+        const res = await fetch(`/api/posts/${p.id}`, { credentials: "include" });
+        if (res.ok) {
+          const full = await res.json();
+          if (typeof full?.content === "string" && full.content.trim() !== "") content = full.content;
+          if (!category && typeof full?.category === "string") category = full.category;
+        } else {
+          const resList = await fetch(`/api/posts`, { credentials: "include" });
+          if (resList.ok) {
+            const list: any[] = await resList.json();
+            const found = list.find((x) => Number(x?.id) === p.id);
+            if (found) {
+              if (!content && typeof found?.content === "string") content = found.content;
+              if (!category && typeof found?.category === "string") category = found.category;
+              if (!title && typeof found?.title === "string") title = found.title;
+            }
+          }
+        }
+      } catch { }
+    }
+
+    setEditForm({ title, category, content });
   }
+
   function cancelEdit() {
     setEditingId(null);
     setEditForm({});
   }
+
   async function saveEdit(id: number) {
     if (!editForm.title?.trim() || !editForm.content?.trim()) {
       setError("Titel och innehåll krävs.");
@@ -151,11 +225,14 @@ export default function Board() {
     setSaving(true);
     setError(null);
     try {
-      await postsApi.update(id, {
-        title: editForm.title!.trim(),
-        content: editForm.content!.trim(),
-        category: (editForm.category || "").toString().trim(),
-      });
+      const payload: { title?: string; content?: string; category?: string } = {
+        title: editForm.title?.trim(),
+        content: editForm.content?.trim(),
+      };
+      if (typeof editForm.category === "string" && editForm.category.trim() !== "") {
+        payload.category = editForm.category.trim();
+      }
+      await postsApi.update(id, payload);
       await fetchPosts();
       cancelEdit();
     } catch (e: any) {
@@ -216,6 +293,14 @@ export default function Board() {
         ...prev,
         [postId]: { author: user?.username ?? author, content: "" },
       }));
+      // bump count lokalt
+      setPosts((prev) =>
+        prev.map((p) =>
+          p.id === postId
+            ? { ...p, comment_count: (typeof p.comment_count === "number" ? p.comment_count : 0) + 1 }
+            : p
+        )
+      );
     } catch (e: any) {
       setError(e?.message ?? "Kunde inte skapa kommentar.");
     }
@@ -229,9 +314,24 @@ export default function Board() {
         ...prev,
         [postId]: (prev[postId] || []).filter((c) => c.id !== commentId),
       }));
+      // sänk count lokalt
+      setPosts((prev) =>
+        prev.map((p) =>
+          p.id === postId
+            ? { ...p, comment_count: Math.max(0, (typeof p.comment_count === "number" ? p.comment_count : 0) - 1) }
+            : p
+        )
+      );
     } catch (e: any) {
       setError(e?.message ?? "Kunde inte ta bort kommentaren.");
     }
+  }
+
+  // Hjälp: förhandsvisning & Läs mer
+  function preview(text: string | undefined | null, max = 240) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return text.slice(0, max).trimEnd() + "…";
   }
 
   return (
@@ -422,7 +522,11 @@ export default function Board() {
                       {/* Read mode */}
                       <div className="d-flex justify-content-between align-items-start">
                         <div>
-                          <h5 className="card-title mb-1">{p.title}</h5>
+                          <h5 className="card-title mb-1">
+                            <Link to={`/board/${p.id}`} className="text-decoration-none">
+                              {p.title}
+                            </Link>
+                          </h5>
                           <small className="text-muted">
                             av <strong>{p.author}</strong> · {fmt(p.created)}
                           </small>
@@ -469,9 +573,16 @@ export default function Board() {
                           )}
                         </div>
                       </div>
+
+                      {/* Preview + Läs mer */}
                       <p className="card-text mt-3" style={{ whiteSpace: "pre-wrap" }}>
-                        {p.content}
+                        {preview(p.content)}
                       </p>
+                      {p.content && p.content.length > 240 && (
+                        <Link to={`/board/${p.id}`} className="btn btn-sm btn-outline-primary">
+                          Läs mer
+                        </Link>
+                      )}
 
                       {/* Comments */}
                       <div className="mt-3">
@@ -489,9 +600,7 @@ export default function Board() {
                               Visa kommentarer <FaChevronDown className="ms-1" />
                             </>
                           )}
-                          {typeof p.comment_count === "number"
-                            ? ` (${p.comment_count})`
-                            : ""}
+                          {typeof p.comment_count === "number" ? ` (${p.comment_count})` : ""}
                         </button>
 
                         {commentsOpen[p.id] && (

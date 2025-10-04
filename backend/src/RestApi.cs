@@ -11,6 +11,8 @@ public static class RestApi
     // === Validering ===
     private static readonly Regex SafeCategory = new(@"^[a-zA-Z0-9\s\-_]{1,64}$", RegexOptions.Compiled);
     private static readonly Regex SafeUsername = new(@"^[a-zA-Z0-9_\-\.]{3,32}$", RegexOptions.Compiled);
+    private static readonly Regex EmailRegex = new(@"^[^@\s]+@[^@\s]+\.[^@\s]+$", RegexOptions.Compiled);
+    private static readonly Regex PhoneRegex = new(@"^\+?[0-9\s\-]{6,20}$", RegexOptions.Compiled);
 
     // === Databasplacering: backend/data/_db.sqlite3 ===
     private static string DbDir => Path.Combine(App.Environment.ContentRootPath, "data");
@@ -153,6 +155,9 @@ public static class RestApi
             cmd.ExecuteNonQuery();
         }
 
+        // Lägg till profil-kolumner i users om de saknas
+        EnsureUserProfileColumns(conn);
+
         // View: posts + antal kommentarer
         using (var v = conn.CreateCommand())
         {
@@ -195,6 +200,34 @@ public static class RestApi
         }
     }
 
+    private static void EnsureUserProfileColumns(SqliteConnection conn)
+    {
+        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var q = conn.CreateCommand())
+        {
+            q.CommandText = "PRAGMA table_info(users)";
+            using var r = q.ExecuteReader();
+            while (r.Read())
+            {
+                cols.Add(r.GetString(1)); // name
+            }
+        }
+
+        if (!cols.Contains("email"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE users ADD COLUMN email TEXT";
+            alter.ExecuteNonQuery();
+        }
+
+        if (!cols.Contains("phone"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE users ADD COLUMN phone TEXT";
+            alter.ExecuteNonQuery();
+        }
+    }
+
     // === Sanering & validering ===
     private static string Sanitize(string? s)
     {
@@ -207,12 +240,17 @@ public static class RestApi
     private static bool IsValidAuthor(string? a) => !string.IsNullOrWhiteSpace(a) && a!.Length <= 100;
     private static bool IsValidContent(string? c) => !string.IsNullOrWhiteSpace(c) && c!.Length <= 10_000;
     private static bool IsValidCategory(string? c) => !string.IsNullOrWhiteSpace(c) && SafeCategory.IsMatch(c!);
+    private static bool IsValidEmail(string? e) => string.IsNullOrWhiteSpace(e) || EmailRegex.IsMatch(e!);
+    private static bool IsValidPhone(string? p) => string.IsNullOrWhiteSpace(p) || PhoneRegex.IsMatch(p!);
 
     // DTOs
     private record PostDto(int id, string title, string content, string author, string category, string created, string? updated);
-    private record PostCreateDto(string title, string content, string author, string category);
+    private record PostCreateReq(string title, string content, string category); // author sätts server-side
+    private record PostUpdateReq(string? title, string? content, string? category); // partiell uppdatering
     private record CommentDto(int id, int post_id, string author, string content, string created);
     private record CommentCreateDto(string author, string content);
+    private record ProfileDto(string username, string role, string? email, string? phone);
+    private record ProfileUpdate(string? email, string? phone);
 
     // Hjälp: ägar/roll-koll
     private static async Task<bool> IsOwnerOrAdmin(SqliteConnection conn, string postId, CurrentUser u)
@@ -317,6 +355,49 @@ public static class RestApi
             return Results.Ok(new { ok = true });
         });
 
+        // ============== PROFILE (NYTT) ==============
+        App.MapGet("/api/profile", async (HttpContext ctx) =>
+        {
+            if (!TryGetUser(ctx, out var u)) return Results.Unauthorized();
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT username, role, email, phone FROM users WHERE username=$u";
+            cmd.Parameters.AddWithValue("$u", u.Username);
+            using var r = await cmd.ExecuteReaderAsync();
+            if (!await r.ReadAsync()) return Results.NotFound();
+
+            var dto = new ProfileDto(
+                r.GetString(0),
+                r.GetString(1),
+                r.IsDBNull(2) ? null : r.GetString(2),
+                r.IsDBNull(3) ? null : r.GetString(3)
+            );
+            return Results.Ok(dto);
+        });
+
+        App.MapPut("/api/profile", async (HttpContext ctx, ProfileUpdate incoming) =>
+        {
+            if (!TryGetUser(ctx, out var u)) return Results.Unauthorized();
+
+            var email = (incoming.email ?? "").Trim();
+            var phone = (incoming.phone ?? "").Trim();
+
+            if (!IsValidEmail(email)) return Results.BadRequest(new { error = "Ogiltig e-postadress." });
+            if (!IsValidPhone(phone)) return Results.BadRequest(new { error = "Ogiltigt telefonnummer." });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            using var up = conn.CreateCommand();
+            up.CommandText = "UPDATE users SET email=$e, phone=$p WHERE username=$u";
+            up.Parameters.AddWithValue("$u", u.Username);
+            up.Parameters.AddWithValue("$e", string.IsNullOrWhiteSpace(email) ? DBNull.Value : email);
+            up.Parameters.AddWithValue("$p", string.IsNullOrWhiteSpace(phone) ? DBNull.Value : phone);
+            var rows = await up.ExecuteNonQueryAsync();
+            return rows == 0 ? Results.NotFound() : Results.NoContent();
+        });
+
         // ============== POSTS ==============
         App.MapGet("/api/posts", async (HttpRequest req) =>
         {
@@ -361,13 +442,39 @@ public static class RestApi
             return Results.Ok(list);
         });
 
-        App.MapPost("/api/posts", async (HttpContext ctx, PostCreateDto incoming) =>
+        App.MapGet("/api/posts/{id}", async (string id) =>
         {
+            if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
+
+            using var conn = GetConn();
+            await conn.OpenAsync();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, title, content, author, category, created, updated
+                FROM posts
+                WHERE id = $id
+                """;
+            cmd.Parameters.AddWithValue("$id", int.Parse(id));
+
+            using var r = await cmd.ExecuteReaderAsync();
+            if (!await r.ReadAsync()) return Results.NotFound();
+
+            var dto = new PostDto(
+                r.GetInt32(0), r.GetString(1), r.GetString(2),
+                r.GetString(3), r.GetString(4), r.GetString(5),
+                r.IsDBNull(6) ? null : r.GetString(6)
+            );
+            return Results.Ok(dto);
+        });
+
+        App.MapPost("/api/posts", async (HttpContext ctx, PostCreateReq incoming) =>
+        {
+            if (!TryGetUser(ctx, out var u)) return Results.Unauthorized();
+
             var title = Sanitize(incoming.title);
             var content = Sanitize(incoming.content);
-            var author = Sanitize(incoming.author);
             var category = Sanitize(incoming.category);
-            if (TryGetUser(ctx, out var u)) author = u.Username; // author från session
+            var author = u.Username; // alltid från session
 
             if (!IsValidTitle(title) || !IsValidContent(content) || !IsValidAuthor(author) || !IsValidCategory(category))
                 return Results.BadRequest(new { error = "Invalid input" });
@@ -392,7 +499,7 @@ public static class RestApi
             return Results.Created($"/api/posts/{id}", new { id });
         });
 
-        App.MapPut("/api/posts/{id}", async (HttpContext ctx, string id, PostCreateDto incoming) =>
+        App.MapPut("/api/posts/{id}", async (HttpContext ctx, string id, PostUpdateReq incoming) =>
         {
             if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
             if (!TryGetUser(ctx, out var u)) return Results.Unauthorized();
@@ -401,19 +508,38 @@ public static class RestApi
             await conn.OpenAsync();
             if (!await IsOwnerOrAdmin(conn, id, u)) return Results.Forbid();
 
-            var title = Sanitize(incoming.title);
-            var content = Sanitize(incoming.content);
-            var category = Sanitize(incoming.category);
-
-            if (!IsValidTitle(title) || !IsValidContent(content) || !IsValidCategory(category))
-                return Results.BadRequest(new { error = "Invalid input" });
-
+            var sets = new List<string>();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE posts SET title=$t, content=$c, category=$cat, updated=datetime('now') WHERE id=$id";
-            cmd.Parameters.AddWithValue("$t", title);
-            cmd.Parameters.AddWithValue("$c", content);
-            cmd.Parameters.AddWithValue("$cat", category);
             cmd.Parameters.AddWithValue("$id", int.Parse(id));
+
+            if (incoming.title is not null)
+            {
+                var title = Sanitize(incoming.title);
+                if (!IsValidTitle(title)) return Results.BadRequest(new { error = "Invalid title" });
+                sets.Add("title=$t");
+                cmd.Parameters.AddWithValue("$t", title);
+            }
+
+            if (incoming.content is not null)
+            {
+                var content = Sanitize(incoming.content);
+                if (!IsValidContent(content)) return Results.BadRequest(new { error = "Invalid content" });
+                sets.Add("content=$c");
+                cmd.Parameters.AddWithValue("$c", content);
+            }
+
+            if (incoming.category is not null)
+            {
+                var category = Sanitize(incoming.category);
+                if (!IsValidCategory(category)) return Results.BadRequest(new { error = "Invalid category" });
+                sets.Add("category=$cat");
+                cmd.Parameters.AddWithValue("$cat", category);
+            }
+
+            if (sets.Count == 0)
+                return Results.BadRequest(new { error = "No fields to update" });
+
+            cmd.CommandText = $"UPDATE posts SET {string.Join(", ", sets)}, updated=datetime('now') WHERE id=$id";
             var rows = await cmd.ExecuteNonQueryAsync();
             return rows == 0 ? Results.NotFound() : Results.NoContent();
         });
@@ -521,18 +647,26 @@ public static class RestApi
             return rows == 0 ? Results.NotFound() : Results.NoContent();
         });
 
-        // ============== USERS ==============
+        // ============== USERS (lista) ==============
         App.MapGet("/api/users", async () =>
         {
             using var conn = GetConn();
             await conn.OpenAsync();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id, username, role, created FROM users ORDER BY id";
+            cmd.CommandText = "SELECT id, username, role, created, email, phone FROM users ORDER BY id";
             var list = new List<object>();
             using var r = await cmd.ExecuteReaderAsync();
             while (await r.ReadAsync())
             {
-                list.Add(new { id = r.GetInt32(0), username = r.GetString(1), role = r.GetString(2), created = r.GetString(3) });
+                list.Add(new
+                {
+                    id = r.GetInt32(0),
+                    username = r.GetString(1),
+                    role = r.GetString(2),
+                    created = r.GetString(3),
+                    email = r.IsDBNull(4) ? null : r.GetString(4),
+                    phone = r.IsDBNull(5) ? null : r.GetString(5)
+                });
             }
             return Results.Ok(list);
         });

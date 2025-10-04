@@ -1,0 +1,21 @@
+/* sass/_theme-dark.scss */
+:root {
+  --bg-dark: #121212;
+  --fg-dark: #f8f9fa;
+  --primary-dark: #0dcaf0;
+  --secondary-dark: #adb5bd;
+  --accent-dark: #20c997;
+  --card-bg-dark: #1e1e1e;
+}
+
+/* Bakgrund & text */
+body.dark {
+  background-color: var(--bg-dark);
+  color: var(--fg-dark);
+}
+
+/* Kort, knappar osv */
+.dark .card {
+  background-color: var(--card-bg-dark);
+  color: var(--fg-dark);
+}
