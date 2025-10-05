@@ -5,7 +5,18 @@ public static class Server
     public static void Start()
     {
         var builder = WebApplication.CreateBuilder();
+
+        // ✅ LÄGG TILL DENNA RAD för CORS
+        builder.Services.AddCors();
+
         App = builder.Build();
+
+        // ✅ LÄGG TILL DENNA RAD för CORS middleware
+        App.UseCors(policy => policy
+            .AllowAnyOrigin()
+            .AllowAnyMethod()
+            .AllowAnyHeader());
+
         Middleware();
         DebugLog.Start();
         Acl.Start();

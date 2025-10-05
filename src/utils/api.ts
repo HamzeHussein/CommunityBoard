@@ -40,7 +40,7 @@ export type Profile = {
 };
 
 // === BASE ===
-const BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || "";
+const BASE_URL = "https://communityboard.fly.dev";
 
 /** Vanlig JSON/text-request (returnerar T) */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
