@@ -1,6 +1,0 @@
-**/bin
-**/obj
-**/node_modules
-.git
-.vscode
-dist
