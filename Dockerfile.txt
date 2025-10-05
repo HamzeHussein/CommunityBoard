@@ -1,0 +1,33 @@
+# ---------- STAGE 1: Frontend build ----------
+FROM node:20 AS fe
+WORKDIR /app
+COPY package*.json ./
+COPY tsconfig*.json ./
+COPY vite.config.ts ./
+COPY src ./src
+COPY public ./public
+RUN npm ci
+RUN npm run build
+
+# ---------- STAGE 2: .NET build/publish ----------
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY backend/*.csproj ./backend/
+RUN dotnet restore ./backend/Backend.csproj
+COPY backend ./backend
+RUN dotnet publish ./backend/Backend.csproj -c Release -o /app/publish
+
+# ---------- STAGE 3: Runtime ----------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+WORKDIR /app
+ENV ASPNETCORE_URLS=http://+:8080
+ENV PORT=8080 \
+  FRONTEND_PATH=/public \
+  DB_PATH=/app/data/_db.sqlite3 \
+  ACL_ON=false \
+  ACL_RULES=[]
+COPY --from=build /app/publish .
+COPY --from=fe /app/dist /public
+RUN mkdir -p /app/data
+EXPOSE 8080
+ENTRYPOINT ["dotnet","Backend.dll"]
