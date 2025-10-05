@@ -1,26 +1,26 @@
-# --- Build stage ---
+# --- build stage ---
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
-
-# Kopiera csproj separat för snabbare cache
 COPY backend/*.csproj ./backend/
 RUN dotnet restore ./backend/Backend.csproj
 
-# Kopiera resten och publicera
 COPY backend/ ./backend/
 WORKDIR /src/backend
 RUN dotnet publish -c Release -o /app/publish
 
-# --- Runtime stage ---
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
+# --- runtime stage ---
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
-
-# Render skickar PORT — låt Kestrel lyssna på den
-ENV ASPNETCORE_URLS=http://0.0.0.0:${PORT}
-
 COPY --from=build /app/publish ./
 
-# (valfritt för lokal test)
+# Din app skriver/läser SQLite i /app/data
+VOLUME ["/app/data"]
+
+# Lyssna på 8080 utåt
 EXPOSE 8080
 
-CMD ["dotnet", "Backend.dll"]
+# Kör .NET-appen och låt eventuella argument (t.ex. 8080) skickas till programmet
+ENTRYPOINT ["dotnet","Backend.dll"]
+
+# (Valfritt) standardargument = 8080 så att den funkar även utan extra arg till `docker run`
+CMD ["8080"]
