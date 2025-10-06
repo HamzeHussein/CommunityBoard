@@ -1,4 +1,5 @@
 // src/utils/api.ts
+
 export type Post = {
   id: number;
   author: string;
@@ -7,7 +8,7 @@ export type Post = {
   category: string;
   created: string;
   updated?: string | null;
-  comment_count?: number; // från vy /api/posts/with-count
+  comment_count?: number;
 };
 
 export type Comment = {
@@ -40,12 +41,15 @@ export type Profile = {
 };
 
 // === BASE ===
-const BASE_URL = "https://communityboard.fly.dev";
+// Tom => samma origin (Vite-proxy i dev, samma app i prod).
+// Vill du peka på extern backend, sätt VITE_API_BASE i .env.local
+const BASE_URL =
+  (import.meta?.env?.VITE_API_BASE as string | undefined)?.trim() || "";
 
-/** Vanlig JSON/text-request (returnerar T) */
+/** JSON/text-request (returnerar T) */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
-    credentials: "include",
+    credentials: "include", // skicka/spara session-cookie
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -64,18 +68,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     return JSON.parse(raw) as T;
   } catch {
-    // om backend skulle returnera ren text
-    return (raw as unknown) as T;
+    return (raw as unknown) as T; // om servern skickar plain text
   }
 }
 
-/** Blob-request för filnedladdningar (CSV/JSON som fil) */
+/** Blob-request (för filnedladdningar) */
 async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
   const res = await fetch(`${BASE_URL}${path}`, {
     credentials: "include",
     ...init,
     headers: {
-      // OBS: sätt inte Content-Type här – servern bestämmer för filsvar
       ...(init?.headers || {}),
     },
   });
@@ -90,22 +92,14 @@ async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
 
 // === POSTS API ===
 export const postsApi = {
-  /**
-   * Smart list:
-   * - Om varken search eller category är satta -> hämta från vyn (/api/posts/with-count)
-   *   så vi får med comment_count direkt (VG-kravet “vyer via REST” används i UI).
-   * - Annars: vanliga /api/posts med filter.
-   */
   list: async (search?: string, category?: string) => {
     const s = (search ?? "").trim();
     const c = (category ?? "").trim();
 
     if (!s && !c) {
-      // använd vyn
       return request<Post[]>(`/api/posts/with-count`);
     }
 
-    // använd filtrerad lista
     const qs = new URLSearchParams();
     if (s) qs.set("search", s);
     if (c) qs.set("category", c);
@@ -113,7 +107,6 @@ export const postsApi = {
     return request<Post[]>(`/api/posts${q ? `?${q}` : ""}`);
   },
 
-  // Finns kvar ifall vi vill hämta vyn explicit någon gång
   listWithCount: () => request<Post[]>(`/api/posts/with-count`),
 
   create: (data: Pick<Post, "title" | "content" | "category">) =>
@@ -145,6 +138,7 @@ export const commentsApi = {
 };
 
 // === AUTH API ===
+// Viktigt: dina auth-endpoints ligger under /api/auth/...
 export const authApi = {
   login: (username: string, password: string) =>
     request<AuthUser>(`/api/auth/login`, {
@@ -163,23 +157,23 @@ export const authApi = {
   logout: () => request<{ ok: boolean }>(`/api/auth/logout`, { method: "POST" }),
 };
 
-// === USERS API (ev. adminvy i framtiden) ===
+// === USERS API ===
 export const usersApi = {
   list: () => request<User[]>(`/api/users`),
 };
 
-// === EXPORT API (filnedladdningar) ===
+// === EXPORT API ===
 export const exportApi = {
-  json: () => requestBlob(`/api/export/posts.json`), // application/json (som fil)
-  csv: () => requestBlob(`/api/export/posts.csv`),   // text/csv (som fil)
+  json: () => requestBlob(`/api/export/posts.json`),
+  csv: () => requestBlob(`/api/export/posts.csv`),
 };
 
-// === PROFILE API (NYTT) ===
+// === PROFILE API ===
 export const profileApi = {
   get: () => request<Profile>(`/api/profile`),
   update: (data: { email?: string; phone?: string }) =>
     request<void>(`/api/profile`, {
-      method: "PUT",
+      method: "PUT", // behåll PUT – cookies fixade -> 200
       body: JSON.stringify(data),
     }),
 };
