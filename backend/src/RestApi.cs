@@ -126,7 +126,9 @@ public static class RestApi
                   username TEXT NOT NULL UNIQUE,
                   password_hash TEXT NOT NULL,
                   role TEXT NOT NULL CHECK(role IN ('admin','user')),
-                  created TEXT NOT NULL DEFAULT (datetime('now'))
+                  created TEXT NOT NULL DEFAULT (datetime('now')),
+                  email TEXT,
+                  phone TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS posts (
@@ -155,9 +157,6 @@ public static class RestApi
             cmd.ExecuteNonQuery();
         }
 
-        // Lägg till profil-kolumner i users om de saknas
-        EnsureUserProfileColumns(conn);
-
         // View: posts + antal kommentarer
         using (var v = conn.CreateCommand())
         {
@@ -172,7 +171,7 @@ public static class RestApi
             v.ExecuteNonQuery();
         }
 
-        // Seed användare (hashade lösenord)
+        // Seed användare (hashade lösenord) & välkomstpost
         using (var check = conn.CreateCommand())
         {
             check.CommandText = "SELECT COUNT(*) FROM users";
@@ -197,34 +196,6 @@ public static class RestApi
                 seed.Parameters.AddWithValue("$uHash", userHash);
                 seed.ExecuteNonQuery();
             }
-        }
-    }
-
-    private static void EnsureUserProfileColumns(SqliteConnection conn)
-    {
-        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var q = conn.CreateCommand())
-        {
-            q.CommandText = "PRAGMA table_info(users)";
-            using var r = q.ExecuteReader();
-            while (r.Read())
-            {
-                cols.Add(r.GetString(1)); // name
-            }
-        }
-
-        if (!cols.Contains("email"))
-        {
-            using var alter = conn.CreateCommand();
-            alter.CommandText = "ALTER TABLE users ADD COLUMN email TEXT";
-            alter.ExecuteNonQuery();
-        }
-
-        if (!cols.Contains("phone"))
-        {
-            using var alter = conn.CreateCommand();
-            alter.CommandText = "ALTER TABLE users ADD COLUMN phone TEXT";
-            alter.ExecuteNonQuery();
         }
     }
 
@@ -263,6 +234,9 @@ public static class RestApi
         return a != null && a.Equals(u.Username, StringComparison.OrdinalIgnoreCase);
     }
 
+    // ----------------------------------------------------------------
+    // Huvud: mappar alla endpoints (utan parameter)
+    // ----------------------------------------------------------------
     public static void Start()
     {
         EnsureSchema();
@@ -272,8 +246,6 @@ public static class RestApi
             Results.Ok(new { ok = true, time = DateTime.UtcNow, db = DbPath, exists = File.Exists(DbPath) }));
 
         // ============== AUTH ==============
-
-        // Register (skapa konto)
         App.MapPost("/api/auth/register", async (AuthRequest req) =>
         {
             var username = (req.username ?? "").Trim();
@@ -287,7 +259,6 @@ public static class RestApi
             using var conn = GetConn();
             await conn.OpenAsync();
 
-            // Finns redan?
             using (var chk = conn.CreateCommand())
             {
                 chk.CommandText = "SELECT 1 FROM users WHERE username=$u";
@@ -296,7 +267,6 @@ public static class RestApi
                 if (exists != null) return Results.Conflict(new { error = "Användarnamnet är upptaget." });
             }
 
-            // Skapa hash & spara som vanlig user
             var hash = HashPassword(password);
             using (var ins = conn.CreateCommand())
             {
@@ -309,7 +279,6 @@ public static class RestApi
             return Results.Created($"/api/users/{username}", new { username, role = "user" });
         });
 
-        // Login
         App.MapPost("/api/auth/login", async (HttpContext ctx, AuthRequest req) =>
         {
             using var conn = GetConn();
@@ -340,7 +309,6 @@ public static class RestApi
             return Results.Ok(new { username, role });
         });
 
-        // Current user
         App.MapGet("/api/auth/me", (HttpContext ctx) =>
         {
             return TryGetUser(ctx, out var u)
@@ -348,14 +316,13 @@ public static class RestApi
                 : Results.Unauthorized();
         });
 
-        // Logout
         App.MapPost("/api/auth/logout", (HttpContext ctx) =>
         {
             ctx.Response.Cookies.Delete(AUTH_COOKIE, new CookieOptions { Path = "/" });
             return Results.Ok(new { ok = true });
         });
 
-        // ============== PROFILE (NYTT) ==============
+        // ============== PROFILE ==============
         App.MapGet("/api/profile", async (HttpContext ctx) =>
         {
             if (!TryGetUser(ctx, out var u)) return Results.Unauthorized();
@@ -632,7 +599,6 @@ public static class RestApi
             return Results.Created($"/api/comments/{id}", new { id });
         });
 
-        // DELETE kommentar — admin-only
         App.MapDelete("/api/comments/{id}", async (HttpContext ctx, string id) =>
         {
             if (!IsValidId(id)) return Results.BadRequest(new { error = "Invalid id" });
